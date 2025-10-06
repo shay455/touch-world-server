@@ -1,7 +1,6 @@
-import express from 'express';
-import { createServer } from 'http';
-import { Server } from 'socket.io';
-import cors from 'cors';
+import express from 'npm:express@4.18.2';
+import { createServer } from 'node:http';
+import { Server } from 'npm:socket.io@4.6.1';
 
 const app = express();
 const httpServer = createServer(app);
@@ -9,57 +8,53 @@ const httpServer = createServer(app);
 // 🔐 CORS Configuration
 const io = new Server(httpServer, {
     cors: {
-        origin: '*',
+        origin: [
+            'http://localhost:3000',
+            'http://localhost:5173',
+            'https://base44.app',
+            'https://*.base44.app',
+            /\.base44\.app$/
+        ],
         methods: ['GET', 'POST'],
         credentials: true
     },
-    transports: ['websocket', 'polling'],
-    pingTimeout: 60000,
-    pingInterval: 25000
+    transports: ['websocket', 'polling']
 });
 
-app.use(cors());
 app.use(express.json());
 
 // 📊 Game State
 const rooms = new Map();
 const playerToRoom = new Map();
 const socketToPlayer = new Map();
+const playerAfkStatus = new Map();
+const serverStartTime = Date.now();
 
 // 🏥 Health Check
 app.get('/', (req, res) => {
+    const uptime = Math.floor((Date.now() - serverStartTime) / 1000);
     res.json({
         status: 'ok',
         service: 'Touch World Multiplayer Server',
-        version: '2.0',
+        version: '2.1',
         players: socketToPlayer.size,
         rooms: rooms.size,
-        uptime: process.uptime(),
+        uptime: uptime,
         timestamp: new Date().toISOString()
     });
 });
 
 app.get('/health', (req, res) => {
+    const uptime = Math.floor((Date.now() - serverStartTime) / 1000);
     res.json({ 
         status: 'healthy',
-        uptime: process.uptime(),
-        memory: process.memoryUsage(),
-        connections: io.engine.clientsCount
-    });
-});
-
-// 📊 Stats endpoint
-app.get('/stats', (req, res) => {
-    const roomStats = {};
-    rooms.forEach((room, roomId) => {
-        roomStats[roomId] = room.players.size;
-    });
-    
-    res.json({
-        totalPlayers: socketToPlayer.size,
-        totalRooms: rooms.size,
-        roomStats,
-        timestamp: new Date().toISOString()
+        uptime: uptime,
+        memory: {
+            rss: Deno.memoryUsage().rss,
+            heapTotal: Deno.memoryUsage().heapTotal,
+            heapUsed: Deno.memoryUsage().heapUsed,
+            external: Deno.memoryUsage().external
+        }
     });
 });
 
@@ -77,43 +72,46 @@ io.on('connection', (socket) => {
                 return;
             }
 
+            console.log('👤 Player joining:', {
+                username: playerData.username,
+                skin_code: playerData.skin_code
+            });
+
             const roomId = `area_${areaId}`;
             
-            // Leave previous room if exists
             const oldRoom = playerToRoom.get(playerId);
             if (oldRoom && oldRoom !== roomId) {
                 leaveRoom(socket, playerId, oldRoom);
             }
 
-            // Join new room
             socket.join(roomId);
             socketToPlayer.set(socket.id, playerId);
             playerToRoom.set(playerId, roomId);
+            playerAfkStatus.set(playerId, false);
 
-            // Initialize room if needed
             if (!rooms.has(roomId)) {
                 rooms.set(roomId, { players: new Map() });
             }
 
             const room = rooms.get(roomId);
+            
             room.players.set(playerId, {
                 ...playerData,
                 socketId: socket.id,
+                isAfk: false,
                 lastUpdate: Date.now()
             });
 
             console.log(`👤 Player ${playerData.username} (${playerId}) joined ${roomId}`);
 
-            // Send current players to new player
             const existingPlayers = Array.from(room.players.values())
                 .filter(p => p.id !== playerId);
             
+            console.log(`📤 Sending ${existingPlayers.length} existing players to new player`);
             socket.emit('playersUpdate', { players: existingPlayers });
 
-            // Notify others about new player
             socket.to(roomId).emit('playerJoined', playerData);
 
-            // Send full room state
             broadcastRoomState(roomId);
 
         } catch (error) {
@@ -137,12 +135,10 @@ io.on('connection', (socket) => {
             const player = room.players.get(playerId);
             if (!player) return;
 
-            // Update player state
             Object.assign(player, data, {
                 lastUpdate: Date.now()
             });
 
-            // Broadcast to others in room (not to sender)
             socket.to(roomId).emit('playerStateUpdate', {
                 playerId,
                 ...data
@@ -150,6 +146,35 @@ io.on('connection', (socket) => {
 
         } catch (error) {
             console.error('Player state error:', error);
+        }
+    });
+
+    // 💤 Player AFK Status
+    socket.on('playerAfk', (data) => {
+        try {
+            const { playerId, isAfk } = data;
+            const roomId = playerToRoom.get(playerId);
+            
+            if (!roomId) return;
+
+            const room = rooms.get(roomId);
+            if (!room) return;
+
+            const player = room.players.get(playerId);
+            if (!player) return;
+
+            player.isAfk = isAfk;
+            playerAfkStatus.set(playerId, isAfk);
+
+            console.log(`💤 Player ${player.username} is ${isAfk ? 'AFK' : 'back'}`);
+
+            io.to(roomId).emit('playerAfkUpdate', {
+                playerId,
+                isAfk
+            });
+
+        } catch (error) {
+            console.error('AFK status error:', error);
         }
     });
 
@@ -162,7 +187,6 @@ io.on('connection', (socket) => {
             const roomId = playerToRoom.get(playerId);
             if (!roomId) return;
 
-            // Broadcast bubble to entire room (including sender)
             io.to(roomId).emit('bubbleMessage', {
                 ...data,
                 timestamp: Date.now()
@@ -175,12 +199,11 @@ io.on('connection', (socket) => {
         }
     });
 
-    // 🔄 Trade Request
+    // 🤝 Trade Request
     socket.on('tradeRequest', (data) => {
         try {
             const { tradeId, initiator_id, receiver_id } = data;
             
-            // Find receiver's socket
             const receiverRoom = playerToRoom.get(receiver_id);
             if (!receiverRoom) return;
 
@@ -190,7 +213,6 @@ io.on('connection', (socket) => {
             const receiverPlayer = room.players.get(receiver_id);
             if (!receiverPlayer) return;
 
-            // Send to receiver
             io.to(receiverPlayer.socketId).emit('tradeRequest', {
                 tradeId,
                 initiator_id,
@@ -214,7 +236,6 @@ io.on('connection', (socket) => {
             const roomId = playerToRoom.get(playerId);
             if (!roomId) return;
 
-            // Broadcast to room
             io.to(roomId).emit('tradeUpdate', {
                 tradeId,
                 status
@@ -227,52 +248,7 @@ io.on('connection', (socket) => {
         }
     });
 
-    // 🚪 Change Area
-    socket.on('changeArea', (data) => {
-        try {
-            const { playerId, newAreaId, playerData } = data;
-            
-            const oldRoom = playerToRoom.get(playerId);
-            if (!oldRoom) return;
-
-            const newRoomId = `area_${newAreaId}`;
-            
-            // Leave old room
-            leaveRoom(socket, playerId, oldRoom);
-            
-            // Join new room
-            socket.leave(oldRoom);
-            socket.join(newRoomId);
-            playerToRoom.set(playerId, newRoomId);
-
-            if (!rooms.has(newRoomId)) {
-                rooms.set(newRoomId, { players: new Map() });
-            }
-
-            const newRoom = rooms.get(newRoomId);
-            newRoom.players.set(playerId, {
-                ...playerData,
-                socketId: socket.id,
-                lastUpdate: Date.now()
-            });
-
-            // Send existing players in new area
-            const existingPlayers = Array.from(newRoom.players.values())
-                .filter(p => p.id !== playerId);
-            
-            socket.emit('playersUpdate', { players: existingPlayers });
-            
-            // Notify new area about player
-            socket.to(newRoomId).emit('playerJoined', playerData);
-
-            console.log(`🚪 Player ${playerData.username} moved to ${newAreaId}`);
-
-        } catch (error) {
-            console.error('Change area error:', error);
-        }
-    });
-
-    // 👋 Disconnect
+    // 🚪 Disconnect
     socket.on('disconnect', () => {
         try {
             const playerId = socketToPlayer.get(socket.id);
@@ -293,14 +269,9 @@ io.on('connection', (socket) => {
             console.error('Disconnect error:', error);
         }
     });
-
-    // ❤️ Ping/Pong for connection health
-    socket.on('ping', () => {
-        socket.emit('pong', { timestamp: Date.now() });
-    });
 });
 
-// 🚪 Leave Room Helper
+// 🔧 Helper Functions
 function leaveRoom(socket, playerId, roomId) {
     socket.leave(roomId);
     
@@ -308,10 +279,8 @@ function leaveRoom(socket, playerId, roomId) {
     if (room) {
         room.players.delete(playerId);
         
-        // Notify others
         socket.to(roomId).emit('playerLeft', { playerId });
         
-        // Remove empty rooms
         if (room.players.size === 0) {
             rooms.delete(roomId);
             console.log(`🗑️ Room ${roomId} removed (empty)`);
@@ -321,66 +290,71 @@ function leaveRoom(socket, playerId, roomId) {
     }
     
     playerToRoom.delete(playerId);
+    playerAfkStatus.delete(playerId);
 }
 
-// 📡 Broadcast Room State
 function broadcastRoomState(roomId) {
     const room = rooms.get(roomId);
     if (!room) return;
 
-    const players = Array.from(room.players.values());
-    io.to(roomId).emit('playersUpdate', { players });
+    const allPlayers = Array.from(room.players.values());
+    
+    console.log(`📡 Broadcasting ${allPlayers.length} players in ${roomId}`);
+    
+    io.to(roomId).emit('playersUpdate', { players: allPlayers });
 }
 
-// 🧹 Cleanup Inactive Players (every 60 seconds)
+// 🧹 Cleanup Inactive Players
 setInterval(() => {
     const now = Date.now();
-    const TIMEOUT = 120000; // 2 minutes
+    const TIMEOUT = 60000;
 
     rooms.forEach((room, roomId) => {
-        const toRemove = [];
-        
+        const playersToRemove = [];
         room.players.forEach((player, playerId) => {
             if (now - player.lastUpdate > TIMEOUT) {
-                console.log(`⏰ Removing inactive player: ${playerId}`);
-                toRemove.push(playerId);
+                playersToRemove.push(playerId);
             }
         });
 
-        toRemove.forEach(playerId => {
-            const socketId = room.players.get(playerId)?.socketId;
-            room.players.delete(playerId);
-            playerToRoom.delete(playerId);
-            if (socketId) socketToPlayer.delete(socketId);
+        playersToRemove.forEach(playerId => {
+            console.log(`⏰ Removing inactive player: ${playerId}`);
+            const player = room.players.get(playerId);
+
+            let socketFound = false;
+            if (player && player.socketId) {
+                const socket = io.sockets.sockets.get(player.socketId);
+                if (socket) {
+                    leaveRoom(socket, playerId, roomId);
+                    socketToPlayer.delete(socket.id);
+                    socketFound = true;
+                }
+            }
             
-            io.to(roomId).emit('playerLeft', { playerId });
+            if (!socketFound) {
+                room.players.delete(playerId);
+                playerToRoom.delete(playerId);
+                playerAfkStatus.delete(playerId);
+                if (player && player.socketId) {
+                    socketToPlayer.delete(player.socketId);
+                }
+                io.to(roomId).emit('playerLeft', { playerId });
+            }
         });
 
         if (room.players.size === 0) {
             rooms.delete(roomId);
+            console.log(`🗑️ Room ${roomId} removed (empty)`);
+        } else if (playersToRemove.length > 0) {
+            broadcastRoomState(roomId);
         }
     });
-}, 60000);
+}, 30000);
 
 // 🚀 Start Server
-const PORT = process.env.PORT || 3001;
+const PORT = Deno.env.get('PORT') || 3001;
 
 httpServer.listen(PORT, () => {
-    console.log(`
-╔═══════════════════════════════════════╗
-║  🎮 Touch World Multiplayer Server   ║
-║  📡 Port: ${PORT.toString().padEnd(28)}║
-║  ✅ Status: Running                   ║
-║  🌐 Socket.IO: Ready                  ║
-╚═══════════════════════════════════════╝
-    `);
-});
-
-// 🛑 Graceful Shutdown
-process.on('SIGTERM', () => {
-    console.log('⚠️ SIGTERM received, shutting down gracefully...');
-    httpServer.close(() => {
-        console.log('✅ Server closed');
-        process.exit(0);
-    });
+    console.log(`🚀 Touch World Server v2.1 running on port ${PORT}`);
+    console.log(`📊 Ready for connections`);
 });
