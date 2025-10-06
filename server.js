@@ -1,14 +1,14 @@
-import express from 'express';
-import { createServer } from 'http';
-import { Server } from 'socket.io';
-import cors from 'cors';
+import express from 'npm:express@4.18.2';
+import { createServer } from 'node:http';
+import { Server } from 'npm:socket.io@4.6.1';
+import cors from 'npm:cors@2.8.5';
 
 // ═══════════════════════════════════════════════════════════
 // 🎮 TOUCH WORLD MULTIPLAYER SERVER v2.7
 // FIXED: Single Source of Truth (BodySkinConfig Only!)
 // ═══════════════════════════════════════════════════════════
 
-const PORT = process.env.PORT || 10000;
+const PORT = parseInt(Deno.env.get('PORT') || '10000');
 const app = express();
 const httpServer = createServer(app);
 
@@ -317,7 +317,11 @@ setInterval(() => {
     if (cleaned > 0) console.log(`🧹 Cleaned ${cleaned} inactive players`);
 }, 30000);
 
-// Start
+// Start Server
+Deno.serve({ port: PORT, hostname: '0.0.0.0' }, async (req) => {
+    return new Response('Server running via Express', { status: 200 });
+});
+
 httpServer.listen(PORT, '0.0.0.0', () => {
     console.log('═══════════════════════════════════════');
     console.log('🎮 TOUCH WORLD SERVER v2.7 - RUNNING');
