@@ -17,11 +17,5 @@
   },
   "engines": {
     "node": ">=18.0.0"
-  },
-  "keywords": [
-    "multiplayer",
-    "websocket",
-    "game-server",
-    "socketio"
-  ]
+  }
 }
