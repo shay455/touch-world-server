@@ -1,8 +1,11 @@
 {
   "name": "touch-world-server",
   "version": "2.1.0",
+  "description": "Touch World Multiplayer Server",
   "type": "module",
   "main": "server.js",
+  "license": "MIT",
+  "private": true,
   "scripts": {
     "start": "node server.js"
   },
