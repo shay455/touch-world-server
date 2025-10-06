@@ -1,70 +1,67 @@
 import { createServer } from 'node:http';
 import { Server } from 'socket.io';
-import { corsOptions } from './config/cors.js';
-import { gameState, removePlayer } from './state/gameState.js';
-import { setupPlayerHandlers } from './sockets/playerHandlers.js';
-import { setupChatHandlers } from './sockets/chatHandlers.js';
-import { setupTradeHandlers } from './sockets/tradeHandlers.js';
-import { handleApiRoutes } from './routes/apiRoutes.js';
-import { Logger } from './utils/logger.js';
+import { corsOptions } from './cors.js';
+import { gameState, addPlayer, getPlayer, removePlayerBySocketId } from './gameState.js';
+import { setupEventHandlers } from './handlers.js';
+import { Logger } from './logger.js';
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3001;
 
 const httpServer = createServer((req, res) => {
-    handleApiRoutes(req, res, gameState);
+    // Basic health check for Render
+    if (req.url === '/health') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok', players: gameState.players.size }));
+    } else {
+        res.writeHead(404);
+        res.end();
+    }
 });
 
 const io = new Server(httpServer, {
     cors: corsOptions,
     pingTimeout: 60000,
     pingInterval: 25000,
-    transports: ['websocket', 'polling']
 });
 
 io.on('connection', (socket) => {
-    Logger.connection('NEW CONNECTION', { socketId: socket.id, total: io.engine.clientsCount });
+    const { playerId, areaId } = socket.handshake.query;
 
-    setupPlayerHandlers(socket, io);
-    setupChatHandlers(socket, io);
-    setupTradeHandlers(socket, io);
+    if (!playerId || !areaId) {
+        Logger.error('Connection Rejected: Missing playerId or areaId.');
+        socket.disconnect(true);
+        return;
+    }
+
+    Logger.connection(`New Connection -> Player: ${playerId}, Area: ${areaId}`);
+    
+    addPlayer(playerId, { socketId: socket.id, id: playerId, areaId: areaId, joinedAt: Date.now() });
+    socket.join(areaId);
+
+    setupEventHandlers(socket, io);
 
     socket.on('disconnect', (reason) => {
-        let disconnectedPlayer = null;
-        for (const [playerId, player] of gameState.players.entries()) {
-            if (player.socketId === socket.id) {
-                disconnectedPlayer = player;
-                socket.to(player.areaId).emit('playerLeft', { playerId });
-                removePlayer(playerId);
-                break;
-            }
-        }
+        const disconnectedPlayer = getPlayer(playerId);
         if (disconnectedPlayer) {
+            socket.to(disconnectedPlayer.areaId).emit('playerLeft', { playerId: disconnectedPlayer.id });
             const duration = Math.round((Date.now() - disconnectedPlayer.joinedAt) / 1000);
-            Logger.connection('DISCONNECT', { 
-                user: disconnectedPlayer.username, 
-                reason, 
-                duration: `${duration}s`,
-                remaining: gameState.players.size 
-            });
+            Logger.connection(`Player Disconnected: ${disconnectedPlayer.username || playerId} after ${duration}s. Reason: ${reason}`);
         }
+        removePlayerBySocketId(socket.id);
     });
 });
 
+// Main game loop for broadcasting state
 setInterval(() => {
-    const areaStats = {};
-    for (const player of gameState.players.values()) {
-        areaStats[player.areaId] = (areaStats[player.areaId] || 0) + 1;
-    }
-    Logger.stats('PERIODIC STATS', { 
-        players: gameState.players.size, 
-        trades: gameState.trades.size,
-        areas: areaStats 
+    const areas = [...new Set(Array.from(gameState.players.values()).map(p => p.areaId))];
+    areas.forEach(areaId => {
+        const playersInArea = Array.from(gameState.players.values()).filter(p => p.areaId === areaId);
+        if (playersInArea.length > 0) {
+            io.to(areaId).emit('playersUpdate', { players: playersInArea });
+        }
     });
-}, 300000);
+}, 100); // 10 FPS update rate
 
 httpServer.listen(PORT, () => {
-    console.log(`\n\x1b[36mSERVER ONLINE on port ${PORT}\x1b[0m\n`);
-    Logger.success('Server started successfully');
+    Logger.success(`Touch World Server is online and listening on port ${PORT}`);
 });
-
-export { io, httpServer };
