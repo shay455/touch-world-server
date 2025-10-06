@@ -1,260 +1,221 @@
 import express from 'express';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
+import cors from 'cors';
 
 const app = express();
 const httpServer = createServer(app);
 
+const allowedOrigins = [
+    'http://localhost:5173',
+    'https://preview--copy-565f73e8.base44.app',
+    'https://base44.app',
+    /\.base44\.app$/
+];
+
 const io = new Server(httpServer, {
     cors: {
-        origin: [
-            'http://localhost:3000',
-            'http://localhost:5173',
-            'https://base44.app',
-            'https://*.base44.app',
-            /\.base44\.app$/
-        ],
-        methods: ['GET', 'POST'],
-        credentials: true
+        origin: (origin, callback) => {
+            if (!origin) return callback(null, true);
+            if (allowedOrigins.some(allowed => 
+                typeof allowed === 'string' ? allowed === origin : allowed.test(origin)
+            )) {
+                callback(null, true);
+            } else {
+                callback(new Error('Not allowed by CORS'));
+            }
+        },
+        credentials: true,
+        methods: ['GET', 'POST']
     },
-    transports: ['websocket', 'polling']
+    transports: ['websocket', 'polling'],
+    pingTimeout: 60000,
+    pingInterval: 25000
 });
+
+app.use(cors({
+    origin: (origin, callback) => {
+        if (!origin) return callback(null, true);
+        if (allowedOrigins.some(allowed => 
+            typeof allowed === 'string' ? allowed === origin : allowed.test(origin)
+        )) {
+            callback(null, true);
+        } else {
+            callback(new Error('Not allowed by CORS'));
+        }
+    },
+    credentials: true
+}));
 
 app.use(express.json());
 
-const rooms = new Map();
-const playerToRoom = new Map();
-const socketToPlayer = new Map();
-const playerAfkStatus = new Map();
-const serverStartTime = Date.now();
+// 🎮 Game State
+const gameState = {
+    players: new Map(),
+    areas: new Map(),
+    trades: new Map()
+};
 
-app.get('/', (req, res) => {
-    const uptime = Math.floor((Date.now() - serverStartTime) / 1000);
+// 🔄 Helper Functions
+function getPlayersInArea(areaId) {
+    return Array.from(gameState.players.values()).filter(p => p.areaId === areaId);
+}
+
+function broadcastToArea(areaId, event, data) {
+    const players = getPlayersInArea(areaId);
+    players.forEach(p => {
+        if (p.socketId) {
+            io.to(p.socketId).emit(event, data);
+        }
+    });
+}
+
+// 📡 Socket Connection
+io.on('connection', (socket) => {
+    console.log('✅ Player connected:', socket.id);
+
+    // 🎯 Join Room
+    socket.on('joinRoom', (data) => {
+        const { playerId, areaId, playerData } = data;
+        
+        gameState.players.set(playerId, {
+            ...playerData,
+            socketId: socket.id,
+            areaId: areaId,
+            lastActivity: Date.now()
+        });
+
+        socket.join(areaId);
+        
+        const playersInArea = getPlayersInArea(areaId);
+        
+        // שלח לשחקן החדש את כל השחקנים באזור
+        socket.emit('playersUpdate', { players: playersInArea });
+        
+        // שלח לכל השחקנים באזור שהצטרף שחקן חדש
+        socket.to(areaId).emit('playerJoined', gameState.players.get(playerId));
+        
+        console.log(`🎮 Player ${playerData.username} joined ${areaId}`);
+    });
+
+    // 🏃 Player Movement
+    socket.on('playerState', (data) => {
+        const player = Array.from(gameState.players.values()).find(p => p.socketId === socket.id);
+        
+        if (player && data) {
+            Object.assign(player, data);
+            player.lastActivity = Date.now();
+            
+            socket.to(player.areaId).emit('playerStateUpdate', data);
+        }
+    });
+
+    // 💬 Chat Bubble
+    socket.on('bubbleMessage', (data) => {
+        const player = Array.from(gameState.players.values()).find(p => p.socketId === socket.id);
+        
+        if (player) {
+            socket.to(player.areaId).emit('bubbleMessage', {
+                playerId: data.playerId,
+                message: data.message,
+                username: data.username,
+                adminLevel: data.adminLevel
+            });
+        }
+    });
+
+    // 🔄 Trade Request
+    socket.on('tradeRequest', (data) => {
+        const { tradeId, initiatorId, receiverId } = data;
+        
+        const receiver = gameState.players.get(receiverId);
+        if (receiver && receiver.socketId) {
+            io.to(receiver.socketId).emit('tradeRequest', { tradeId, initiatorId, receiverId });
+        }
+    });
+
+    // 📦 Trade Update
+    socket.on('tradeUpdate', (data) => {
+        const { tradeId, status } = data;
+        
+        gameState.trades.set(tradeId, { ...gameState.trades.get(tradeId), status, updatedAt: Date.now() });
+        
+        io.emit('tradeUpdate', data);
+    });
+
+    // 👕 Appearance Update
+    socket.on('playerAppearanceUpdate', (data) => {
+        const player = gameState.players.get(data.id);
+        
+        if (player) {
+            Object.assign(player, data);
+            socket.to(player.areaId).emit('playerAppearanceUpdate', data);
+        }
+    });
+
+    // 😴 AFK Update
+    socket.on('playerAfkUpdate', (data) => {
+        const { playerId, isAfk } = data;
+        const player = gameState.players.get(playerId);
+        
+        if (player) {
+            player.isAfk = isAfk;
+            socket.to(player.areaId).emit('playerAfkUpdate', { playerId, isAfk });
+        }
+    });
+
+    // 🚪 Disconnect
+    socket.on('disconnect', () => {
+        const player = Array.from(gameState.players.entries()).find(([_, p]) => p.socketId === socket.id);
+        
+        if (player) {
+            const [playerId, playerData] = player;
+            const areaId = playerData.areaId;
+            
+            gameState.players.delete(playerId);
+            
+            socket.to(areaId).emit('playerLeft', { playerId });
+            
+            console.log(`🚪 Player ${playerData.username} disconnected`);
+        }
+    });
+});
+
+// 🧹 Cleanup inactive players every 5 minutes
+setInterval(() => {
+    const now = Date.now();
+    const timeout = 5 * 60 * 1000; // 5 minutes
+    
+    for (const [playerId, player] of gameState.players.entries()) {
+        if (now - player.lastActivity > timeout) {
+            gameState.players.delete(playerId);
+            if (player.areaId) {
+                io.to(player.areaId).emit('playerLeft', { playerId });
+            }
+            console.log(`🧹 Cleaned up inactive player: ${player.username}`);
+        }
+    }
+}, 5 * 60 * 1000);
+
+// ❤️ Health Check
+app.get('/health', (req, res) => {
     res.json({
         status: 'ok',
-        service: 'Touch World Multiplayer Server',
-        version: '2.1',
-        players: socketToPlayer.size,
-        rooms: rooms.size,
-        uptime: uptime,
-        timestamp: new Date().toISOString()
+        players: gameState.players.size,
+        uptime: process.uptime()
     });
 });
 
-app.get('/health', (req, res) => {
-    const uptime = Math.floor((Date.now() - serverStartTime) / 1000);
-    res.json({ 
-        status: 'healthy',
-        uptime: uptime,
-        memory: process.memoryUsage()
+app.get('/', (req, res) => {
+    res.json({
+        status: 'Touch World Multiplayer Server',
+        version: '2.0.0',
+        players: gameState.players.size
     });
 });
 
-io.on('connection', (socket) => {
-    console.log(`✅ Player connected: ${socket.id}`);
+const PORT = process.env.PORT || 3000;
 
-    socket.on('join', (data) => {
-        try {
-            const { playerId, areaId, playerData } = data;
-            
-            if (!playerId || !areaId || !playerData) {
-                socket.emit('error', { message: 'Invalid join data' });
-                return;
-            }
-
-            const roomId = `area_${areaId}`;
-            
-            const oldRoom = playerToRoom.get(playerId);
-            if (oldRoom && oldRoom !== roomId) {
-                leaveRoom(socket, playerId, oldRoom);
-            }
-
-            socket.join(roomId);
-            socketToPlayer.set(socket.id, playerId);
-            playerToRoom.set(playerId, roomId);
-            playerAfkStatus.set(playerId, false);
-
-            if (!rooms.has(roomId)) {
-                rooms.set(roomId, { players: new Map() });
-            }
-
-            const room = rooms.get(roomId);
-            
-            room.players.set(playerId, {
-                ...playerData,
-                socketId: socket.id,
-                isAfk: false,
-                lastUpdate: Date.now()
-            });
-
-            const existingPlayers = Array.from(room.players.values())
-                .filter(p => p.id !== playerId);
-            
-            socket.emit('playersUpdate', { players: existingPlayers });
-            socket.to(roomId).emit('playerJoined', playerData);
-            broadcastRoomState(roomId);
-
-        } catch (error) {
-            console.error('Join error:', error);
-            socket.emit('error', { message: 'Failed to join room' });
-        }
-    });
-
-    socket.on('playerState', (data) => {
-        try {
-            const playerId = socketToPlayer.get(socket.id);
-            if (!playerId) return;
-
-            const roomId = playerToRoom.get(playerId);
-            if (!roomId) return;
-
-            const room = rooms.get(roomId);
-            if (!room) return;
-
-            const player = room.players.get(playerId);
-            if (!player) return;
-
-            Object.assign(player, data, {
-                lastUpdate: Date.now()
-            });
-
-            socket.to(roomId).emit('playerStateUpdate', {
-                playerId,
-                ...data
-            });
-
-        } catch (error) {
-            console.error('Player state error:', error);
-        }
-    });
-
-    socket.on('playerAfk', (data) => {
-        try {
-            const { playerId, isAfk } = data;
-            const roomId = playerToRoom.get(playerId);
-            
-            if (!roomId) return;
-
-            const room = rooms.get(roomId);
-            if (!room) return;
-
-            const player = room.players.get(playerId);
-            if (!player) return;
-
-            player.isAfk = isAfk;
-            playerAfkStatus.set(playerId, isAfk);
-
-            io.to(roomId).emit('playerAfkUpdate', {
-                playerId,
-                isAfk
-            });
-
-        } catch (error) {
-            console.error('AFK error:', error);
-        }
-    });
-
-    socket.on('bubbleMessage', (data) => {
-        try {
-            const { playerId, message, username, adminLevel } = data;
-            const roomId = playerToRoom.get(playerId);
-            
-            if (!roomId) return;
-
-            socket.to(roomId).emit('bubbleMessage', {
-                playerId,
-                message,
-                username,
-                adminLevel
-            });
-
-        } catch (error) {
-            console.error('Bubble message error:', error);
-        }
-    });
-
-    socket.on('tradeRequest', (data) => {
-        try {
-            const { tradeId, initiatorId, receiverId } = data;
-            const receiverRoom = playerToRoom.get(receiverId);
-            
-            if (!receiverRoom) return;
-
-            const room = rooms.get(receiverRoom);
-            if (!room) return;
-
-            const receiverPlayer = room.players.get(receiverId);
-            if (!receiverPlayer) return;
-
-            io.to(receiverPlayer.socketId).emit('tradeRequest', {
-                tradeId,
-                initiatorId,
-                receiverId
-            });
-
-        } catch (error) {
-            console.error('Trade request error:', error);
-        }
-    });
-
-    socket.on('tradeUpdate', (data) => {
-        try {
-            const { tradeId, status } = data;
-            
-            io.emit('tradeUpdate', {
-                tradeId,
-                status
-            });
-
-        } catch (error) {
-            console.error('Trade update error:', error);
-        }
-    });
-
-    socket.on('disconnect', () => {
-        console.log(`❌ Player disconnected: ${socket.id}`);
-        
-        const playerId = socketToPlayer.get(socket.id);
-        if (playerId) {
-            const roomId = playerToRoom.get(playerId);
-            if (roomId) {
-                leaveRoom(socket, playerId, roomId);
-            }
-            socketToPlayer.delete(socket.id);
-            playerToRoom.delete(playerId);
-            playerAfkStatus.delete(playerId);
-        }
-    });
-});
-
-function leaveRoom(socket, playerId, roomId) {
-    try {
-        const room = rooms.get(roomId);
-        if (room) {
-            room.players.delete(playerId);
-            
-            if (room.players.size === 0) {
-                rooms.delete(roomId);
-            } else {
-                socket.to(roomId).emit('playerLeft', { playerId });
-                broadcastRoomState(roomId);
-            }
-        }
-        socket.leave(roomId);
-    } catch (error) {
-        console.error('Leave room error:', error);
-    }
-}
-
-function broadcastRoomState(roomId) {
-    const room = rooms.get(roomId);
-    if (!room) return;
-
-    const players = Array.from(room.players.values());
-    io.to(roomId).emit('playersUpdate', { players });
-}
-
-const PORT = process.env.PORT || 3001;
-httpServer.listen(PORT, () => {
+httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Touch World Server running on port ${PORT}`);
 });
