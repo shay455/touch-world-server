@@ -1,6 +1,6 @@
-import express from 'npm:express@4.18.2';
-import { createServer } from 'node:http';
-import { Server } from 'npm:socket.io@4.6.1';
+import express from 'express';
+import { createServer } from 'http';
+import { Server } from 'socket.io';
 
 const app = express();
 const httpServer = createServer(app);
@@ -49,12 +49,7 @@ app.get('/health', (req, res) => {
     res.json({ 
         status: 'healthy',
         uptime: uptime,
-        memory: {
-            rss: Deno.memoryUsage().rss,
-            heapTotal: Deno.memoryUsage().heapTotal,
-            heapUsed: Deno.memoryUsage().heapUsed,
-            external: Deno.memoryUsage().external
-        }
+        memory: process.memoryUsage()
     });
 });
 
@@ -352,7 +347,7 @@ setInterval(() => {
 }, 30000);
 
 // 🚀 Start Server
-const PORT = Deno.env.get('PORT') || 3001;
+const PORT = process.env.PORT || 3001;
 
 httpServer.listen(PORT, () => {
     console.log(`🚀 Touch World Server v2.1 running on port ${PORT}`);
