@@ -3,7 +3,11 @@ import { createServer } from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
 
-// 🌐 Environment Variables
+// ═══════════════════════════════════════════════════════════
+// 🎮 TOUCH WORLD MULTIPLAYER SERVER
+// Real-time game synchronization with Socket.IO
+// ═══════════════════════════════════════════════════════════
+
 const PORT = process.env.PORT || 10000;
 
 // 🚀 Express App
@@ -13,44 +17,38 @@ const httpServer = createServer(app);
 // 🔓 CORS Configuration
 const allowedOrigins = [
     'http://localhost:5173',
+    'http://localhost:3000',
     'https://preview--copy-565f73e8.base44.app',
     'https://base44.app',
     /\.base44\.app$/,
     /\.onrender\.com$/
 ];
 
-app.use(cors({
+const corsOptions = {
     origin: (origin, callback) => {
         if (!origin) return callback(null, true);
-        if (allowedOrigins.some(allowed => 
+        
+        const isAllowed = allowedOrigins.some(allowed => 
             typeof allowed === 'string' ? allowed === origin : allowed.test(origin)
-        )) {
+        );
+        
+        if (isAllowed) {
             callback(null, true);
         } else {
+            console.warn('⚠️ Blocked by CORS:', origin);
             callback(new Error('Not allowed by CORS'));
         }
     },
-    credentials: true
-}));
+    credentials: true,
+    methods: ['GET', 'POST']
+};
 
+app.use(cors(corsOptions));
 app.use(express.json());
 
 // 🎮 Socket.IO Configuration
 const io = new Server(httpServer, {
-    cors: {
-        origin: (origin, callback) => {
-            if (!origin) return callback(null, true);
-            if (allowedOrigins.some(allowed => 
-                typeof allowed === 'string' ? allowed === origin : allowed.test(origin)
-            )) {
-                callback(null, true);
-            } else {
-                callback(new Error('Not allowed by CORS'));
-            }
-        },
-        credentials: true,
-        methods: ['GET', 'POST']
-    },
+    cors: corsOptions,
     transports: ['websocket', 'polling'],
     allowEIO3: true,
     pingTimeout: 60000,
@@ -59,16 +57,17 @@ const io = new Server(httpServer, {
     connectTimeout: 45000
 });
 
-// 📊 Game State (In-Memory Only)
+// 📊 Game State (In-Memory)
 const gameState = {
     players: new Map(),
+    rooms: new Map(),
     startTime: Date.now()
 };
 
-// 🏠 Helper Functions
+// 🔧 Helper Functions
 function getRoomPlayers(roomId) {
     return Array.from(gameState.players.values())
-        .filter(p => p.roomId === roomId)
+        .filter(p => p.roomId === roomId && !p.is_invisible)
         .map(p => ({
             id: p.id,
             username: p.username,
@@ -84,7 +83,6 @@ function getRoomPlayers(roomId) {
             equipped_necklace: p.equipped_necklace,
             equipped_accessories: p.equipped_accessories,
             admin_level: p.admin_level,
-            is_invisible: p.is_invisible,
             is_moving: p.is_moving,
             animation_frame: p.animation_frame
         }));
@@ -92,6 +90,23 @@ function getRoomPlayers(roomId) {
 
 function broadcastToRoom(roomId, event, data) {
     io.to(`area_${roomId}`).emit(event, data);
+}
+
+function cleanupInactivePlayers() {
+    const now = Date.now();
+    const timeout = 5 * 60 * 1000; // 5 minutes
+    
+    let cleaned = 0;
+    for (const [playerId, player] of gameState.players.entries()) {
+        if (now - player.lastUpdate > timeout) {
+            gameState.players.delete(playerId);
+            cleaned++;
+        }
+    }
+    
+    if (cleaned > 0) {
+        console.log(`🧹 Cleaned ${cleaned} inactive players`);
+    }
 }
 
 // 🔌 Socket.IO Connection Handler
@@ -102,12 +117,19 @@ io.on('connection', (socket) => {
     socket.on('join', (data) => {
         try {
             const { playerId, areaId, playerData } = data;
+            
+            if (!playerId || !areaId || !playerData) {
+                console.error('❌ Invalid join data');
+                return;
+            }
+
             console.log(`👤 ${playerData.username} joining ${areaId}`);
 
             // Leave previous room
             const currentPlayer = gameState.players.get(playerId);
             if (currentPlayer?.roomId) {
                 socket.leave(`area_${currentPlayer.roomId}`);
+                socket.to(`area_${currentPlayer.roomId}`).emit('playerLeft', { playerId });
             }
 
             // Join new room
@@ -126,12 +148,15 @@ io.on('connection', (socket) => {
             const roomPlayers = getRoomPlayers(areaId);
             socket.emit('playersUpdate', { players: roomPlayers });
 
-            // Notify others
-            socket.to(`area_${areaId}`).emit('playerJoined', playerData);
+            // Notify others (only if not invisible)
+            if (!playerData.is_invisible) {
+                socket.to(`area_${areaId}`).emit('playerJoined', playerData);
+            }
 
-            console.log(`✅ ${playerData.username} joined (${roomPlayers.length} players)`);
+            console.log(`✅ ${playerData.username} joined ${areaId} (${roomPlayers.length} players)`);
         } catch (error) {
             console.error('❌ Join error:', error);
+            socket.emit('error', { message: 'Failed to join room' });
         }
     });
 
@@ -140,8 +165,21 @@ io.on('connection', (socket) => {
         try {
             const player = gameState.players.get(data.id);
             if (player) {
-                Object.assign(player, data, { lastUpdate: Date.now() });
-                socket.to(`area_${player.roomId}`).emit('playerStateUpdate', data);
+                Object.assign(player, {
+                    position_x: data.position_x,
+                    position_y: data.position_y,
+                    direction: data.direction,
+                    is_moving: data.is_moving,
+                    animation_frame: data.animation_frame,
+                    velocity_x: data.velocity_x,
+                    velocity_y: data.velocity_y,
+                    lastUpdate: Date.now()
+                });
+                
+                // Only broadcast if not invisible
+                if (!player.is_invisible) {
+                    socket.to(`area_${player.roomId}`).emit('playerStateUpdate', data);
+                }
             }
         } catch (error) {
             console.error('❌ State update error:', error);
@@ -154,18 +192,19 @@ io.on('connection', (socket) => {
             const { playerId, message, username, adminLevel } = data;
             const player = gameState.players.get(playerId);
             
-            if (player) {
+            if (player && message && message.trim()) {
                 console.log(`💬 ${username}: ${message}`);
+                
                 broadcastToRoom(player.roomId, 'bubbleMessage', {
                     playerId,
-                    message,
+                    message: message.trim(),
                     username,
                     adminLevel,
                     timestamp: Date.now()
                 });
             }
         } catch (error) {
-            console.error('❌ Bubble error:', error);
+            console.error('❌ Bubble message error:', error);
         }
     });
 
@@ -176,16 +215,28 @@ io.on('connection', (socket) => {
             const player = gameState.players.get(playerId);
             
             if (player) {
+                Object.assign(player, {
+                    skin_code: data.skin_code,
+                    equipped_hair: data.equipped_hair,
+                    equipped_top: data.equipped_top,
+                    equipped_pants: data.equipped_pants,
+                    equipped_hat: data.equipped_hat,
+                    equipped_halo: data.equipped_halo,
+                    equipped_necklace: data.equipped_necklace,
+                    equipped_accessories: data.equipped_accessories,
+                    equipped_shoes: data.equipped_shoes,
+                    equipped_gloves: data.equipped_gloves
+                });
+                
                 console.log(`👗 ${player.username} changed appearance`);
-                Object.assign(player, data);
+                
                 socket.to(`area_${player.roomId}`).emit('playerAppearanceUpdate', {
                     ...data,
-                    id: playerId,
                     username: player.username
                 });
             }
         } catch (error) {
-            console.error('❌ Appearance error:', error);
+            console.error('❌ Appearance change error:', error);
         }
     });
 
@@ -197,22 +248,26 @@ io.on('connection', (socket) => {
             
             if (player) {
                 player.isAfk = isAfk;
-                console.log(`💤 ${player.username} ${isAfk ? 'AFK' : 'back'}`);
-                broadcastToRoom(player.roomId, 'playerAfkUpdate', { playerId, isAfk });
+                console.log(`💤 ${player.username} is ${isAfk ? 'AFK' : 'back'}`);
+                
+                broadcastToRoom(player.roomId, 'playerAfkUpdate', {
+                    playerId,
+                    isAfk
+                });
             }
         } catch (error) {
-            console.error('❌ AFK error:', error);
+            console.error('❌ AFK update error:', error);
         }
     });
 
-    // 🤝 Trade Request
+    // 🤝 Trade Requests
     socket.on('tradeRequest', (data) => {
         try {
             const { tradeId, initiatorId, receiverId } = data;
-            const receiver = gameState.players.get(receiverId);
+            console.log(`🤝 Trade request: ${initiatorId} → ${receiverId}`);
             
-            if (receiver) {
-                console.log(`🤝 Trade: ${initiatorId} → ${receiverId}`);
+            const receiver = gameState.players.get(receiverId);
+            if (receiver?.socketId) {
                 io.to(receiver.socketId).emit('tradeRequest', { tradeId, initiatorId, receiverId });
             }
         } catch (error) {
@@ -220,28 +275,30 @@ io.on('connection', (socket) => {
         }
     });
 
-    // 🔄 Trade Update
     socket.on('tradeUpdate', (data) => {
         try {
             const { tradeId, status } = data;
-            console.log(`🔄 Trade ${tradeId}: ${status}`);
+            console.log(`🔄 Trade update: ${tradeId} → ${status}`);
+            
+            // Broadcast to all players in the trade
             io.emit('tradeUpdate', { tradeId, status });
         } catch (error) {
             console.error('❌ Trade update error:', error);
         }
     });
 
-    // 🚪 Disconnect
+    // 🚪 Player Disconnect
     socket.on('disconnect', () => {
         try {
-            console.log('❌ Player disconnected:', socket.id);
+            let disconnectedPlayer = null;
             
             for (const [playerId, player] of gameState.players.entries()) {
                 if (player.socketId === socket.id) {
-                    const roomId = player.roomId;
+                    disconnectedPlayer = player;
                     gameState.players.delete(playerId);
-                    broadcastToRoom(roomId, 'playerLeft', { playerId });
-                    console.log(`👋 ${player.username} left`);
+                    
+                    socket.to(`area_${player.roomId}`).emit('playerLeft', { playerId });
+                    console.log(`👋 ${player.username} disconnected`);
                     break;
                 }
             }
@@ -251,57 +308,54 @@ io.on('connection', (socket) => {
     });
 });
 
-// 🔄 Periodic Updates (every 5 seconds)
-setInterval(() => {
-    try {
-        const rooms = new Set(Array.from(gameState.players.values()).map(p => p.roomId));
-        for (const roomId of rooms) {
-            const players = getRoomPlayers(roomId);
-            if (players.length > 0) {
-                broadcastToRoom(roomId, 'playersUpdate', { players });
-            }
-        }
-    } catch (error) {
-        console.error('❌ Update error:', error);
-    }
-}, 5000);
-
-// 🧹 Cleanup Inactive (every 30 seconds)
-setInterval(() => {
-    try {
-        const now = Date.now();
-        for (const [playerId, player] of gameState.players.entries()) {
-            if (now - player.lastUpdate > 60000) {
-                const roomId = player.roomId;
-                gameState.players.delete(playerId);
-                broadcastToRoom(roomId, 'playerLeft', { playerId });
-                console.log(`🧹 Removed inactive: ${player.username}`);
-            }
-        }
-    } catch (error) {
-        console.error('❌ Cleanup error:', error);
-    }
-}, 30000);
-
-// 🏥 Health Check
+// 🏥 Health Check Endpoint
 app.get('/health', (req, res) => {
+    const uptime = (Date.now() - gameState.startTime) / 1000;
+    const playerCount = gameState.players.size;
+    
     res.json({
         status: 'ok',
-        players: gameState.players.size,
-        uptime: (Date.now() - gameState.startTime) / 1000,
-        port: PORT
+        players: playerCount,
+        uptime: uptime,
+        port: PORT,
+        timestamp: new Date().toISOString()
     });
 });
 
-// 🚀 Start Server
-httpServer.listen(PORT, '0.0.0.0', () => {
-    console.log('═══════════════════════════════════════════════════');
-    console.log('🎮 Touch World Multiplayer Server v2.1');
-    console.log('═══════════════════════════════════════════════════');
-    console.log(`✅ Server: http://0.0.0.0:${PORT}`);
-    console.log(`🌐 WebSocket ready`);
-    console.log(`📍 Health: http://0.0.0.0:${PORT}/health`);
-    console.log('═══════════════════════════════════════════════════');
+// 📊 Stats Endpoint
+app.get('/stats', (req, res) => {
+    const rooms = {};
+    for (const [playerId, player] of gameState.players.entries()) {
+        const roomId = player.roomId || 'unknown';
+        rooms[roomId] = (rooms[roomId] || 0) + 1;
+    }
+    
+    res.json({
+        totalPlayers: gameState.players.size,
+        rooms: rooms,
+        uptime: (Date.now() - gameState.startTime) / 1000
+    });
 });
 
-export default httpServer;
+// 🧹 Cleanup Task (every 5 minutes)
+setInterval(cleanupInactivePlayers, 5 * 60 * 1000);
+
+// 🚀 Start Server
+httpServer.listen(PORT, '0.0.0.0', () => {
+    console.log('═══════════════════════════════════════════════════════════');
+    console.log('🎮 TOUCH WORLD MULTIPLAYER SERVER');
+    console.log('═══════════════════════════════════════════════════════════');
+    console.log(`✅ Server running on port ${PORT}`);
+    console.log(`🌐 Health check: http://localhost:${PORT}/health`);
+    console.log(`📊 Stats: http://localhost:${PORT}/stats`);
+    console.log('═══════════════════════════════════════════════════════════');
+});
+
+// 🛡️ Error Handling
+process.on('uncaughtException', (error) => {
+    console.error('❌ Uncaught Exception:', error);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
+});
