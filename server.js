@@ -1,72 +1,103 @@
 import { createServer } from 'http';
 import { Server } from 'socket.io';
+import { createClient } from '@base44/sdk-node';
 
-const httpServer = createServer();
+// --- הגדרות ---
+const PORT = process.env.PORT || 3000;
+const SYNC_INTERVAL = 45; // ms
 
 // --- הגדרות CORS ---
-// אלו הכתובות שמורשות להתחבר לשרת שלך
 const allowedOrigins = [
-    'http://localhost:5173', // לפיתוח מקומי
-    'https://copy-565f73e8.base44.app', // כתובת האפליקציה הראשית
-    'https://preview--copy-565f73e8.base44.app' // כתובת התצוגה המקדימה
+    'http://localhost:5173',
+    'https://copy-565f73e8.base44.app',
+    'https://preview--copy-565f73e8.base44.app'
 ];
+
+// --- אתחול החיבור ל-Base44 ---
+const base44 = createClient({
+    appUrl: process.env.BASE44_APP_URL,
+    apiKey: process.env.BASE44_API_KEY
+});
+
+if (!process.env.BASE44_APP_URL || !process.env.BASE44_API_KEY) {
+    console.error('❌ CRITICAL: BASE44_APP_URL or BASE44_API_KEY environment variables are not set!');
+    // process.exit(1); // במצב ייצור, נרצה שהשרת יכשל אם אין לו גישה לדאטהבייס
+}
+
+// --- ניהול מצב המשחק ---
+const areaPlayers = {};
+const playerSockets = {};
+
+// --- יצירת השרת ---
+const httpServer = createServer((req, res) => {
+    // Health check endpoint
+    if (req.url === '/health') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok', players: Object.keys(playerSockets).length }));
+    } else {
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.end('Touch World Server is running!');
+    }
+});
 
 const io = new Server(httpServer, {
     cors: {
         origin: (origin, callback) => {
-            // מאפשר חיבורים ללא 'origin' (למשל, אפליקציות מובייל או Postman)
-            if (!origin) return callback(null, true);
-            if (allowedOrigins.indexOf(origin) === -1) {
-                const msg = 'The CORS policy for this site does not allow access from the specified Origin.';
-                return callback(new Error(msg), false);
+            if (!origin || allowedOrigins.includes(origin)) {
+                callback(null, true);
+            } else {
+                callback(new Error('Not allowed by CORS'));
             }
-            return callback(null, true);
         },
-        methods: ["GET", "POST"],
-        credentials: true
     }
 });
 
-// --- ניהול מצב המשחק ---
-const areaPlayers = {}; // אובייקט שיחזיק את כל השחקנים בכל אזור
-const playerSockets = {}; // מפה של playerId ל-socket.id שלו
-
-const SYNC_INTERVAL = 45; // עדכון מצב כל 45ms (כ-22 פריימים לשנייה)
-
-io.on('connection', (socket) => {
-    const playerId = socket.handshake.query.playerId;
-    const areaId = socket.handshake.query.areaId;
+// --- לוגיקת החיבור ---
+io.on('connection', async (socket) => {
+    const { playerId, areaId } = socket.handshake.query;
 
     if (!playerId || !areaId) {
-        console.error('❌ Connection rejected: Missing playerId or areaId');
+        console.log(`🔌 Connection rejected: Missing query params.`);
+        return socket.disconnect();
+    }
+    
+    try {
+        // --- אימות וטעינת נתוני שחקן מ-Base44 ---
+        const player = await base44.entities.Player.get(playerId);
+        if (!player) {
+            console.error(`Auth Error: Player with ID ${playerId} not found.`);
+            return socket.disconnect();
+        }
+
+        playerSockets[playerId] = socket.id;
+        socket.join(areaId);
+
+        if (!areaPlayers[areaId]) {
+            areaPlayers[areaId] = {};
+        }
+        
+        // שמירת האובייקט המלא מהדאטהבייס
+        areaPlayers[areaId][playerId] = { ...player };
+
+        console.log(`✅ ${player.username} (${playerId}) connected to area ${areaId}`);
+
+        // --- עדכון סטטוס ב-Base44 ---
+        await base44.entities.Player.update(playerId, { is_online: true, last_activity: new Date().toISOString() });
+
+    } catch (error) {
+        console.error(`Error during connection for player ${playerId}:`, error.message);
         return socket.disconnect();
     }
 
-    console.log(`✅ Player connected: ${playerId} in area: ${areaId} | Socket ID: ${socket.id}`);
-    playerSockets[playerId] = socket.id;
 
-    // --- הצטרפות לאזור ---
-    socket.join(areaId);
-
-    if (!areaPlayers[areaId]) {
-        areaPlayers[areaId] = {};
-    }
-
-    // הוספת השחקן החדש עם מידע בסיסי, אם לא קיים
-    if (!areaPlayers[areaId][playerId]) {
-         areaPlayers[areaId][playerId] = { id: playerId, x: 960, y: 540, direction: 'front' };
-    }
-    
     // --- טיפול באירועים מהלקוח ---
     socket.on('playerState', (state) => {
-        // עדכון שקט של מצב השחקן. השידור יתבצע בלולאת העדכון המרכזית
         if (areaPlayers[areaId] && areaPlayers[areaId][playerId]) {
             Object.assign(areaPlayers[areaId][playerId], state);
         }
     });
 
     socket.on('bubbleMessage', (data) => {
-        // שדר הודעת בועה לכל השחקנים באותו אזור, חוץ מהשולח
         socket.to(areaId).emit('bubbleMessage', {
             playerId: data.playerId,
             message: data.message,
@@ -77,7 +108,6 @@ io.on('connection', (socket) => {
         const receiverSocketId = playerSockets[receiverId];
         if (receiverSocketId) {
             io.to(receiverSocketId).emit('tradeRequest', { tradeId, initiatorId, receiverId });
-            console.log(`Trade request from ${initiatorId} to ${receiverId} forwarded.`);
         }
     });
     
@@ -89,20 +119,25 @@ io.on('connection', (socket) => {
     });
 
      socket.on('itemUpdate', () => {
-        // שדר לכל הלקוחות אירוע שיגרום להם לרענן את ה-cache
         io.emit('itemDesignsUpdated');
         console.log("📢 Broadcating item design update to all clients.");
     });
 
 
     // --- טיפול בהתנתקות ---
-    socket.on('disconnect', () => {
-        console.log(`🔌 Player disconnected: ${playerId}`);
+    socket.on('disconnect', async () => {
         delete playerSockets[playerId];
         if (areaPlayers[areaId] && areaPlayers[areaId][playerId]) {
+            console.log(`🔌 ${areaPlayers[areaId][playerId].username} disconnected.`);
             delete areaPlayers[areaId][playerId];
-            // הודע לכל השחקנים באזור שהשחקן עזב
             io.to(areaId).emit('playerLeft', { playerId });
+            
+            // עדכון סטטוס ב-Base44
+            try {
+                await base44.entities.Player.update(playerId, { is_online: false });
+            } catch(e) {
+                console.error("Failed to update offline status for player:", playerId, e.message);
+            }
         }
     });
 });
@@ -110,16 +145,18 @@ io.on('connection', (socket) => {
 // --- לולאת שידור מרכזית ---
 setInterval(() => {
     for (const areaId in areaPlayers) {
-        const playersInArea = areaPlayers[areaId];
-        if (Object.keys(playersInArea).length > 0) {
-            io.to(areaId).emit('playersUpdate', { players: Object.values(playersInArea) });
+        const playersInArea = Object.values(areaPlayers[areaId]);
+        if (playersInArea.length > 0) {
+            io.to(areaId).emit('playersUpdate', { players: playersInArea });
         }
     }
 }, SYNC_INTERVAL);
 
 
 // --- הפעלת השרת ---
-const PORT = process.env.PORT || 3001;
 httpServer.listen(PORT, () => {
-    console.log(`🚀 Server is running on port ${PORT}`);
+    console.log(`
+🚀 Touch World Server is live!
+Listening on port: ${PORT}
+`);
 });
