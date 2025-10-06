@@ -4,34 +4,23 @@ import { Server } from 'socket.io';
 import cors from 'cors';
 
 // ═══════════════════════════════════════════════════════════
-// 🎮 TOUCH WORLD MULTIPLAYER SERVER v2.1
-// Real-time game synchronization with Socket.IO
+// 🎮 TOUCH WORLD MULTIPLAYER SERVER v2.2
+// Full Player Synchronization
 // ═══════════════════════════════════════════════════════════
 
 const PORT = process.env.PORT || 10000;
 
-// 🚀 Express Setup
 const app = express();
 const httpServer = createServer(app);
 
-// 🔓 CORS - כל הדומיינים המותרים
+// 🔓 CORS Configuration
 const allowedOrigins = [
-    // Development
     'http://localhost:5173',
     'http://localhost:3000',
-    'http://127.0.0.1:5173',
-    
-    // Base44
     'https://preview--copy-565f73e8.base44.app',
     'https://base44.app',
-    
-    // Touch World Domain
     'https://touch-world.io',
     'https://www.touch-world.io',
-    'http://touch-world.io',
-    'http://www.touch-world.io',
-    
-    // Regex Patterns
     /\.base44\.app$/,
     /\.touch-world\.io$/,
     /\.onrender\.com$/
@@ -39,222 +28,157 @@ const allowedOrigins = [
 
 const corsOptions = {
     origin: (origin, callback) => {
-        // Allow requests with no origin (mobile apps, Postman, etc.)
-        if (!origin) {
-            console.log('✅ Request with no origin allowed');
-            return callback(null, true);
-        }
-        
-        const isAllowed = allowedOrigins.some(allowed => {
-            if (typeof allowed === 'string') {
-                return allowed === origin;
-            } else if (allowed instanceof RegExp) {
-                return allowed.test(origin);
-            }
-            return false;
-        });
-        
-        if (isAllowed) {
-            console.log('✅ CORS allowed:', origin);
-            callback(null, true);
-        } else {
-            console.warn('⚠️ CORS blocked:', origin);
-            callback(null, false); // Changed to false instead of error
-        }
+        if (!origin) return callback(null, true);
+        const isAllowed = allowedOrigins.some(allowed => 
+            typeof allowed === 'string' ? allowed === origin : allowed.test(origin)
+        );
+        callback(null, isAllowed);
     },
     credentials: true,
-    methods: ['GET', 'POST', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization']
+    methods: ['GET', 'POST', 'OPTIONS']
 };
 
 app.use(cors(corsOptions));
 app.use(express.json());
 
-// 🎮 Socket.IO Setup
+// 🎮 Socket.IO
 const io = new Server(httpServer, {
-    cors: {
-        origin: (origin, callback) => {
-            if (!origin) return callback(null, true);
-            
-            const isAllowed = allowedOrigins.some(allowed => {
-                if (typeof allowed === 'string') {
-                    return allowed === origin;
-                } else if (allowed instanceof RegExp) {
-                    return allowed.test(origin);
-                }
-                return false;
-            });
-            
-            callback(null, isAllowed);
-        },
-        credentials: true,
-        methods: ['GET', 'POST']
-    },
+    cors: corsOptions,
     transports: ['websocket', 'polling'],
-    allowEIO3: true,
     pingTimeout: 60000,
     pingInterval: 25000,
     maxHttpBufferSize: 1e8,
-    connectTimeout: 45000,
-    upgradeTimeout: 30000
+    connectTimeout: 45000
 });
 
-// 📊 Game State (In-Memory Storage)
+// 📊 Game State
 const gameState = {
     players: new Map(),
-    rooms: new Map(),
-    trades: new Map(),
-    startTime: Date.now(),
-    stats: {
-        totalConnections: 0,
-        totalMessages: 0,
-        peakPlayers: 0
-    }
+    startTime: Date.now()
 };
 
-// 🔧 Helper Functions
+// 🔧 Helper: Get All Player Data
+function getFullPlayerData(player) {
+    return {
+        id: player.id,
+        username: player.username,
+        position_x: player.position_x || 600,
+        position_y: player.position_y || 400,
+        direction: player.direction || 'front',
+        is_moving: player.is_moving || false,
+        animation_frame: player.animation_frame || 'idle',
+        velocity_x: player.velocity_x || 0,
+        velocity_y: player.velocity_y || 0,
+        
+        // 👗 Appearance Data
+        skin_code: player.skin_code || 'blue',
+        equipped_hair: player.equipped_hair || null,
+        equipped_top: player.equipped_top || null,
+        equipped_pants: player.equipped_pants || null,
+        equipped_hat: player.equipped_hat || null,
+        equipped_halo: player.equipped_halo || null,
+        equipped_necklace: player.equipped_necklace || null,
+        equipped_accessories: player.equipped_accessories || [],
+        equipped_shoes: player.equipped_shoes || null,
+        equipped_gloves: player.equipped_gloves || null,
+        
+        // 🎭 Status
+        admin_level: player.admin_level || 'user',
+        is_invisible: player.is_invisible || false,
+        isAfk: player.isAfk || false,
+        
+        // 💬 Bubble
+        bubbleMessage: player.bubbleMessage || null,
+        bubbleTimestamp: player.bubbleTimestamp || null
+    };
+}
+
+// 🔧 Helper: Get Room Players
 function getRoomPlayers(roomId) {
-    const players = Array.from(gameState.players.values())
-        .filter(p => p.roomId === roomId && !p.is_invisible);
-    
-    return players.map(p => ({
-        id: p.id,
-        username: p.username,
-        position_x: p.position_x || 600,
-        position_y: p.position_y || 400,
-        direction: p.direction || 'front',
-        skin_code: p.skin_code || 'blue',
-        equipped_hair: p.equipped_hair,
-        equipped_top: p.equipped_top,
-        equipped_pants: p.equipped_pants,
-        equipped_hat: p.equipped_hat,
-        equipped_halo: p.equipped_halo,
-        equipped_necklace: p.equipped_necklace,
-        equipped_accessories: p.equipped_accessories || [],
-        equipped_shoes: p.equipped_shoes,
-        equipped_gloves: p.equipped_gloves,
-        admin_level: p.admin_level || 'user',
-        is_moving: p.is_moving || false,
-        animation_frame: p.animation_frame || 'idle',
-        velocity_x: p.velocity_x || 0,
-        velocity_y: p.velocity_y || 0
-    }));
-}
-
-function broadcastToRoom(roomId, event, data) {
-    io.to(`area_${roomId}`).emit(event, data);
-}
-
-function updateRoomsList() {
-    const rooms = new Map();
-    for (const player of gameState.players.values()) {
-        if (player.roomId) {
-            if (!rooms.has(player.roomId)) {
-                rooms.set(player.roomId, 0);
-            }
-            rooms.set(player.roomId, rooms.get(player.roomId) + 1);
+    const players = [];
+    for (const [id, player] of gameState.players.entries()) {
+        if (player.roomId === roomId && !player.is_invisible) {
+            players.push(getFullPlayerData(player));
         }
     }
-    gameState.rooms = rooms;
+    return players;
 }
 
-function cleanupInactivePlayers() {
-    const now = Date.now();
-    const timeout = 5 * 60 * 1000; // 5 minutes
-    
-    let cleaned = 0;
-    for (const [playerId, player] of gameState.players.entries()) {
-        if (now - player.lastUpdate > timeout) {
-            gameState.players.delete(playerId);
-            cleaned++;
-            console.log(`🧹 Removed inactive player: ${player.username}`);
-        }
-    }
-    
-    if (cleaned > 0) {
-        console.log(`🧹 Cleaned ${cleaned} inactive players`);
-        updateRoomsList();
-    }
-}
-
-// 🔌 Socket.IO Connection Handler
+// 🔌 Socket.IO Events
 io.on('connection', (socket) => {
     console.log('✅ Player connected:', socket.id);
-    gameState.stats.totalConnections++;
 
     // 👋 Join Room
     socket.on('join', (data) => {
         try {
             const { playerId, areaId, playerData } = data;
             
-            if (!playerId || !areaId || !playerData) {
-                console.error('❌ Invalid join data:', data);
-                socket.emit('error', { message: 'Invalid join data' });
-                return;
-            }
+            console.log(`👤 ${playerData.username} joining ${areaId}`);
+            console.log('📦 Player data:', {
+                skin: playerData.skin_code,
+                hair: playerData.equipped_hair,
+                top: playerData.equipped_top,
+                pants: playerData.equipped_pants
+            });
 
-            console.log(`👤 Player joining: ${playerData.username} → ${areaId}`);
-
-            // Leave previous room if exists
+            // Leave previous room
             const currentPlayer = gameState.players.get(playerId);
             if (currentPlayer?.roomId) {
-                socket.leave(`area_${currentPlayer.roomId}`);
-                socket.to(`area_${currentPlayer.roomId}`).emit('playerLeft', { playerId });
-                console.log(`🚪 ${playerData.username} left area: ${currentPlayer.roomId}`);
+                const oldRoom = currentPlayer.roomId;
+                socket.leave(`area_${oldRoom}`);
+                socket.to(`area_${oldRoom}`).emit('playerLeft', { playerId });
+                console.log(`🚪 Left area: ${oldRoom}`);
             }
 
             // Join new room
             socket.join(`area_${areaId}`);
-            console.log(`🚪 ${playerData.username} joined area: ${areaId}`);
             
-            // Store/Update player state
+            // Store FULL player data
             gameState.players.set(playerId, {
-                ...playerData,
+                id: playerId,
                 socketId: socket.id,
                 roomId: areaId,
-                lastUpdate: Date.now(),
-                isAfk: false,
-                position_x: playerData.position_x || 600,
-                position_y: playerData.position_y || 400,
-                direction: playerData.direction || 'front',
-                is_moving: false,
-                animation_frame: 'idle'
-            });
-
-            // Update peak players stat
-            if (gameState.players.size > gameState.stats.peakPlayers) {
-                gameState.stats.peakPlayers = gameState.players.size;
-            }
-
-            // Send current room players to new player
-            const roomPlayers = getRoomPlayers(areaId);
-            socket.emit('playersUpdate', { players: roomPlayers });
-
-            // Notify others about new player
-            socket.to(`area_${areaId}`).emit('playerJoined', {
-                id: playerData.id,
                 username: playerData.username,
                 position_x: playerData.position_x || 600,
                 position_y: playerData.position_y || 400,
                 direction: playerData.direction || 'front',
+                is_moving: false,
+                animation_frame: 'idle',
+                velocity_x: 0,
+                velocity_y: 0,
+                
+                // 👗 Store ALL appearance data
                 skin_code: playerData.skin_code || 'blue',
-                equipped_hair: playerData.equipped_hair,
-                equipped_top: playerData.equipped_top,
-                equipped_pants: playerData.equipped_pants,
-                equipped_hat: playerData.equipped_hat,
-                equipped_halo: playerData.equipped_halo,
-                equipped_necklace: playerData.equipped_necklace,
+                equipped_hair: playerData.equipped_hair || null,
+                equipped_top: playerData.equipped_top || null,
+                equipped_pants: playerData.equipped_pants || null,
+                equipped_hat: playerData.equipped_hat || null,
+                equipped_halo: playerData.equipped_halo || null,
+                equipped_necklace: playerData.equipped_necklace || null,
                 equipped_accessories: playerData.equipped_accessories || [],
-                equipped_shoes: playerData.equipped_shoes,
-                equipped_gloves: playerData.equipped_gloves,
-                admin_level: playerData.admin_level || 'user'
+                equipped_shoes: playerData.equipped_shoes || null,
+                equipped_gloves: playerData.equipped_gloves || null,
+                
+                admin_level: playerData.admin_level || 'user',
+                is_invisible: playerData.is_invisible || false,
+                isAfk: false,
+                lastUpdate: Date.now()
             });
 
-            updateRoomsList();
-            console.log(`✅ ${playerData.username} joined successfully (${roomPlayers.length} players in room)`);
+            // Send ALL current players to new player
+            const roomPlayers = getRoomPlayers(areaId);
+            console.log(`📤 Sending ${roomPlayers.length} players to ${playerData.username}`);
+            socket.emit('playersUpdate', { players: roomPlayers });
+
+            // Notify others about new player (with FULL data)
+            const fullPlayerData = getFullPlayerData(gameState.players.get(playerId));
+            socket.to(`area_${areaId}`).emit('playerJoined', fullPlayerData);
+            
+            console.log(`✅ ${playerData.username} joined successfully`);
+            console.log(`👥 Room now has ${roomPlayers.length} players`);
+
         } catch (error) {
             console.error('❌ Join error:', error);
-            socket.emit('error', { message: 'Failed to join room' });
         }
     });
 
@@ -263,19 +187,17 @@ io.on('connection', (socket) => {
         try {
             const player = gameState.players.get(data.id);
             if (player) {
-                // Update player state
-                Object.assign(player, {
-                    position_x: data.position_x,
-                    position_y: data.position_y,
-                    direction: data.direction,
-                    is_moving: data.is_moving,
-                    animation_frame: data.animation_frame,
-                    velocity_x: data.velocity_x || 0,
-                    velocity_y: data.velocity_y || 0,
-                    lastUpdate: Date.now()
-                });
-
-                // Broadcast to room
+                // Update movement data
+                player.position_x = data.position_x;
+                player.position_y = data.position_y;
+                player.direction = data.direction;
+                player.is_moving = data.is_moving;
+                player.animation_frame = data.animation_frame;
+                player.velocity_x = data.velocity_x || 0;
+                player.velocity_y = data.velocity_y || 0;
+                player.lastUpdate = Date.now();
+                
+                // Broadcast to others in room
                 socket.to(`area_${player.roomId}`).emit('playerStateUpdate', {
                     id: data.id,
                     position_x: data.position_x,
@@ -283,12 +205,44 @@ io.on('connection', (socket) => {
                     direction: data.direction,
                     is_moving: data.is_moving,
                     animation_frame: data.animation_frame,
-                    velocity_x: data.velocity_x || 0,
-                    velocity_y: data.velocity_y || 0
+                    velocity_x: data.velocity_x,
+                    velocity_y: data.velocity_y
                 });
             }
         } catch (error) {
             console.error('❌ State update error:', error);
+        }
+    });
+
+    // 👗 Player Appearance Change
+    socket.on('playerAppearanceChange', (data) => {
+        try {
+            const { playerId } = data;
+            const player = gameState.players.get(playerId);
+            
+            if (player) {
+                console.log(`👗 Appearance change for ${player.username}`);
+                
+                // Update ALL appearance fields
+                player.skin_code = data.skin_code || player.skin_code;
+                player.equipped_hair = data.equipped_hair !== undefined ? data.equipped_hair : player.equipped_hair;
+                player.equipped_top = data.equipped_top !== undefined ? data.equipped_top : player.equipped_top;
+                player.equipped_pants = data.equipped_pants !== undefined ? data.equipped_pants : player.equipped_pants;
+                player.equipped_hat = data.equipped_hat !== undefined ? data.equipped_hat : player.equipped_hat;
+                player.equipped_halo = data.equipped_halo !== undefined ? data.equipped_halo : player.equipped_halo;
+                player.equipped_necklace = data.equipped_necklace !== undefined ? data.equipped_necklace : player.equipped_necklace;
+                player.equipped_accessories = data.equipped_accessories || player.equipped_accessories;
+                player.equipped_shoes = data.equipped_shoes !== undefined ? data.equipped_shoes : player.equipped_shoes;
+                player.equipped_gloves = data.equipped_gloves !== undefined ? data.equipped_gloves : player.equipped_gloves;
+                
+                // Broadcast FULL appearance to everyone in room
+                const fullPlayerData = getFullPlayerData(player);
+                io.to(`area_${player.roomId}`).emit('playerAppearanceUpdate', fullPlayerData);
+                
+                console.log(`✅ Appearance updated and broadcast`);
+            }
+        } catch (error) {
+            console.error('❌ Appearance update error:', error);
         }
     });
 
@@ -298,67 +252,22 @@ io.on('connection', (socket) => {
             const { playerId, message, username, adminLevel } = data;
             const player = gameState.players.get(playerId);
             
-            if (player && message) {
-                console.log(`💬 ${username}: ${message}`);
-                gameState.stats.totalMessages++;
-
-                broadcastToRoom(player.roomId, 'bubbleMessage', {
+            if (player) {
+                player.bubbleMessage = message;
+                player.bubbleTimestamp = Date.now();
+                
+                io.to(`area_${player.roomId}`).emit('bubbleMessage', {
                     playerId,
                     message,
                     username,
                     adminLevel: adminLevel || 'user',
                     timestamp: Date.now()
                 });
-
-                player.lastUpdate = Date.now();
+                
+                console.log(`💬 ${username}: ${message}`);
             }
         } catch (error) {
-            console.error('❌ Bubble message error:', error);
-        }
-    });
-
-    // 👗 Appearance Change
-    socket.on('playerAppearanceChange', (data) => {
-        try {
-            const { playerId } = data;
-            const player = gameState.players.get(playerId);
-            
-            if (player) {
-                // Update player appearance
-                Object.assign(player, {
-                    skin_code: data.skin_code || player.skin_code,
-                    equipped_hair: data.equipped_hair !== undefined ? data.equipped_hair : player.equipped_hair,
-                    equipped_top: data.equipped_top !== undefined ? data.equipped_top : player.equipped_top,
-                    equipped_pants: data.equipped_pants !== undefined ? data.equipped_pants : player.equipped_pants,
-                    equipped_hat: data.equipped_hat !== undefined ? data.equipped_hat : player.equipped_hat,
-                    equipped_halo: data.equipped_halo !== undefined ? data.equipped_halo : player.equipped_halo,
-                    equipped_necklace: data.equipped_necklace !== undefined ? data.equipped_necklace : player.equipped_necklace,
-                    equipped_accessories: data.equipped_accessories || player.equipped_accessories,
-                    equipped_shoes: data.equipped_shoes !== undefined ? data.equipped_shoes : player.equipped_shoes,
-                    equipped_gloves: data.equipped_gloves !== undefined ? data.equipped_gloves : player.equipped_gloves,
-                    lastUpdate: Date.now()
-                });
-
-                console.log(`👗 ${player.username} changed appearance`);
-
-                // Broadcast to room
-                socket.to(`area_${player.roomId}`).emit('playerAppearanceUpdate', {
-                    id: playerId,
-                    username: player.username,
-                    skin_code: player.skin_code,
-                    equipped_hair: player.equipped_hair,
-                    equipped_top: player.equipped_top,
-                    equipped_pants: player.equipped_pants,
-                    equipped_hat: player.equipped_hat,
-                    equipped_halo: player.equipped_halo,
-                    equipped_necklace: player.equipped_necklace,
-                    equipped_accessories: player.equipped_accessories,
-                    equipped_shoes: player.equipped_shoes,
-                    equipped_gloves: player.equipped_gloves
-                });
-            }
-        } catch (error) {
-            console.error('❌ Appearance change error:', error);
+            console.error('❌ Bubble error:', error);
         }
     });
 
@@ -370,17 +279,11 @@ io.on('connection', (socket) => {
             
             if (player) {
                 player.isAfk = isAfk;
-                player.lastUpdate = Date.now();
-                
-                broadcastToRoom(player.roomId, 'playerAfkUpdate', { 
-                    playerId, 
-                    isAfk 
-                });
-
-                console.log(`💤 ${player.username} is ${isAfk ? 'AFK' : 'back'}`);
+                io.to(`area_${player.roomId}`).emit('playerAfkUpdate', { playerId, isAfk });
+                console.log(`💤 ${player.username} AFK: ${isAfk}`);
             }
         } catch (error) {
-            console.error('❌ AFK update error:', error);
+            console.error('❌ AFK error:', error);
         }
     });
 
@@ -390,13 +293,9 @@ io.on('connection', (socket) => {
             const { tradeId, initiatorId, receiverId } = data;
             const receiver = gameState.players.get(receiverId);
             
-            if (receiver && receiver.socketId) {
-                io.to(receiver.socketId).emit('tradeRequest', { 
-                    tradeId, 
-                    initiatorId, 
-                    receiverId 
-                });
-                console.log(`🤝 Trade request: ${initiatorId} → ${receiverId}`);
+            if (receiver) {
+                io.to(receiver.socketId).emit('tradeRequest', { tradeId, initiatorId, receiverId });
+                console.log(`🤝 Trade request: ${initiatorId} -> ${receiverId}`);
             }
         } catch (error) {
             console.error('❌ Trade request error:', error);
@@ -407,136 +306,93 @@ io.on('connection', (socket) => {
     socket.on('tradeUpdate', (data) => {
         try {
             const { tradeId, status } = data;
-            
-            // Broadcast to all connected clients
             io.emit('tradeUpdate', { tradeId, status });
-            
-            console.log(`🔄 Trade ${tradeId} updated: ${status}`);
+            console.log(`🔄 Trade ${tradeId}: ${status}`);
         } catch (error) {
             console.error('❌ Trade update error:', error);
         }
     });
 
     // 🚪 Disconnect
-    socket.on('disconnect', (reason) => {
-        console.log('❌ Player disconnected:', socket.id, 'Reason:', reason);
+    socket.on('disconnect', () => {
+        console.log('❌ Player disconnected:', socket.id);
         
-        // Find and remove player
         for (const [playerId, player] of gameState.players.entries()) {
             if (player.socketId === socket.id) {
                 const roomId = player.roomId;
-                const username = player.username;
-                
                 gameState.players.delete(playerId);
-                updateRoomsList();
                 
-                // Notify room
-                broadcastToRoom(roomId, 'playerLeft', { playerId });
-                
-                console.log(`👋 ${username} left the game`);
+                io.to(`area_${roomId}`).emit('playerLeft', { playerId });
+                console.log(`👋 ${player.username} left (${gameState.players.size} players remaining)`);
                 break;
             }
         }
     });
-
-    // ❌ Error Handler
-    socket.on('error', (error) => {
-        console.error('❌ Socket error:', error);
-    });
 });
 
-// 🔄 Periodic Room Updates (every 5 seconds)
-setInterval(() => {
-    for (const [roomId] of gameState.rooms) {
-        const players = getRoomPlayers(roomId);
-        if (players.length > 0) {
-            broadcastToRoom(roomId, 'playersUpdate', { players });
-        }
-    }
-}, 5000);
-
-// 🧹 Cleanup Inactive Players (every 30 seconds)
-setInterval(cleanupInactivePlayers, 30000);
-
-// 🏥 Health Check Endpoint
+// 🏥 Health Check
 app.get('/health', (req, res) => {
     res.json({
         status: 'ok',
-        timestamp: new Date().toISOString(),
-        players: gameState.players.size,
-        rooms: gameState.rooms.size,
         uptime: Math.floor((Date.now() - gameState.startTime) / 1000),
-        port: PORT,
-        stats: {
-            totalConnections: gameState.stats.totalConnections,
-            totalMessages: gameState.stats.totalMessages,
-            peakPlayers: gameState.stats.peakPlayers
-        }
-    });
-});
-
-// 🏠 Root Endpoint
-app.get('/', (req, res) => {
-    res.json({
-        name: 'Touch World Multiplayer Server',
-        version: '2.1.0',
-        status: 'running',
         players: gameState.players.size,
-        rooms: Array.from(gameState.rooms.entries()).map(([id, count]) => ({
-            id,
-            players: count
-        }))
+        port: PORT,
+        version: '2.2'
     });
 });
 
 // 📊 Stats Endpoint
 app.get('/stats', (req, res) => {
-    const playersList = Array.from(gameState.players.values()).map(p => ({
-        username: p.username,
-        room: p.roomId,
-        isAfk: p.isAfk
-    }));
-
+    const rooms = new Map();
+    for (const player of gameState.players.values()) {
+        const count = rooms.get(player.roomId) || 0;
+        rooms.set(player.roomId, count + 1);
+    }
+    
     res.json({
-        currentPlayers: gameState.players.size,
-        rooms: Array.from(gameState.rooms.entries()).map(([id, count]) => ({
-            id,
-            players: count
-        })),
-        players: playersList,
-        stats: gameState.stats,
+        totalPlayers: gameState.players.size,
+        rooms: Object.fromEntries(rooms),
         uptime: Math.floor((Date.now() - gameState.startTime) / 1000)
     });
 });
 
+// 🧹 Cleanup Inactive Players (every 30 seconds)
+setInterval(() => {
+    const now = Date.now();
+    const timeout = 5 * 60 * 1000; // 5 minutes
+    
+    let cleaned = 0;
+    for (const [playerId, player] of gameState.players.entries()) {
+        if (now - player.lastUpdate > timeout) {
+            const roomId = player.roomId;
+            gameState.players.delete(playerId);
+            io.to(`area_${roomId}`).emit('playerLeft', { playerId });
+            cleaned++;
+        }
+    }
+    
+    if (cleaned > 0) {
+        console.log(`🧹 Cleaned ${cleaned} inactive players (${gameState.players.size} remaining)`);
+    }
+}, 30000);
+
+// 📊 Stats Logger (every 5 minutes)
+setInterval(() => {
+    console.log('═══════════════════════════════════════');
+    console.log(`👥 Active Players: ${gameState.players.size}`);
+    console.log(`⏱️ Uptime: ${Math.floor((Date.now() - gameState.startTime) / 1000 / 60)} minutes`);
+    console.log('═══════════════════════════════════════');
+}, 5 * 60 * 1000);
+
 // 🚀 Start Server
 httpServer.listen(PORT, '0.0.0.0', () => {
     console.log('═══════════════════════════════════════');
-    console.log('🎮 TOUCH WORLD MULTIPLAYER SERVER');
+    console.log('🎮 TOUCH WORLD MULTIPLAYER SERVER v2.2');
     console.log('═══════════════════════════════════════');
-    console.log(`✅ Server running on port ${PORT}`);
-    console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
-    console.log(`🔌 WebSocket ready for connections`);
+    console.log(`🚀 Server running on port ${PORT}`);
     console.log(`🏥 Health: http://localhost:${PORT}/health`);
     console.log(`📊 Stats: http://localhost:${PORT}/stats`);
     console.log('═══════════════════════════════════════');
-});
-
-// Handle graceful shutdown
-process.on('SIGTERM', () => {
-    console.log('🛑 SIGTERM received, shutting down gracefully...');
-    httpServer.close(() => {
-        console.log('✅ Server closed');
-        process.exit(0);
-    });
-});
-
-process.on('SIGINT', () => {
-    console.log('🛑 SIGINT received, shutting down gracefully...');
-    httpServer.close(() => {
-        console.log('✅ Server closed');
-        process.exit(0);
-    });
 });
 
 export default httpServer;
