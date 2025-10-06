@@ -3,29 +3,27 @@ import { createServer } from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
 
-// ═══════════════════════════════════════════════════════════
-// 🎮 TOUCH WORLD MULTIPLAYER SERVER
-// Real-time game synchronization with Socket.IO
-// ═══════════════════════════════════════════════════════════
-
 const PORT = process.env.PORT || 10000;
 
-// 🚀 Express App
 const app = express();
 const httpServer = createServer(app);
 
-// 🔓 CORS Configuration
+// 🔓 CORS Configuration - הוסף את הדומיין שלך!
 const allowedOrigins = [
     'http://localhost:5173',
     'http://localhost:3000',
     'https://preview--copy-565f73e8.base44.app',
     'https://base44.app',
+    'https://touch-world.io',              // ✅ הוסף את זה!
+    'https://www.touch-world.io',          // ✅ הוסף את זה!
     /\.base44\.app$/,
+    /\.touch-world\.io$/,                  // ✅ הוסף את זה!
     /\.onrender\.com$/
 ];
 
 const corsOptions = {
     origin: (origin, callback) => {
+        // אפשר בקשות ללא origin (כמו Postman, mobile apps)
         if (!origin) return callback(null, true);
         
         const isAllowed = allowedOrigins.some(allowed => 
@@ -57,7 +55,7 @@ const io = new Server(httpServer, {
     connectTimeout: 45000
 });
 
-// 📊 Game State (In-Memory)
+// 📊 Game State
 const gameState = {
     players: new Map(),
     rooms: new Map(),
@@ -94,7 +92,7 @@ function broadcastToRoom(roomId, event, data) {
 
 function cleanupInactivePlayers() {
     const now = Date.now();
-    const timeout = 5 * 60 * 1000; // 5 minutes
+    const timeout = 5 * 60 * 1000;
     
     let cleaned = 0;
     for (const [playerId, player] of gameState.players.entries()) {
@@ -109,11 +107,10 @@ function cleanupInactivePlayers() {
     }
 }
 
-// 🔌 Socket.IO Connection Handler
+// 🔌 Socket.IO Events
 io.on('connection', (socket) => {
     console.log('✅ Player connected:', socket.id);
 
-    // 👋 Join Room
     socket.on('join', (data) => {
         try {
             const { playerId, areaId, playerData } = data;
@@ -125,17 +122,14 @@ io.on('connection', (socket) => {
 
             console.log(`👤 ${playerData.username} joining ${areaId}`);
 
-            // Leave previous room
             const currentPlayer = gameState.players.get(playerId);
             if (currentPlayer?.roomId) {
                 socket.leave(`area_${currentPlayer.roomId}`);
                 socket.to(`area_${currentPlayer.roomId}`).emit('playerLeft', { playerId });
             }
 
-            // Join new room
             socket.join(`area_${areaId}`);
             
-            // Store player state
             gameState.players.set(playerId, {
                 ...playerData,
                 socketId: socket.id,
@@ -144,103 +138,66 @@ io.on('connection', (socket) => {
                 isAfk: false
             });
 
-            // Send current players to new player
             const roomPlayers = getRoomPlayers(areaId);
             socket.emit('playersUpdate', { players: roomPlayers });
+            socket.to(`area_${areaId}`).emit('playerJoined', playerData);
 
-            // Notify others (only if not invisible)
-            if (!playerData.is_invisible) {
-                socket.to(`area_${areaId}`).emit('playerJoined', playerData);
-            }
-
-            console.log(`✅ ${playerData.username} joined ${areaId} (${roomPlayers.length} players)`);
+            console.log(`✅ ${playerData.username} joined (${roomPlayers.length} players)`);
         } catch (error) {
             console.error('❌ Join error:', error);
-            socket.emit('error', { message: 'Failed to join room' });
         }
     });
 
-    // 🏃 Player State Update
     socket.on('playerState', (data) => {
         try {
             const player = gameState.players.get(data.id);
             if (player) {
-                Object.assign(player, {
-                    position_x: data.position_x,
-                    position_y: data.position_y,
-                    direction: data.direction,
-                    is_moving: data.is_moving,
-                    animation_frame: data.animation_frame,
-                    velocity_x: data.velocity_x,
-                    velocity_y: data.velocity_y,
-                    lastUpdate: Date.now()
-                });
-                
-                // Only broadcast if not invisible
-                if (!player.is_invisible) {
-                    socket.to(`area_${player.roomId}`).emit('playerStateUpdate', data);
-                }
+                Object.assign(player, data, { lastUpdate: Date.now() });
+                socket.to(`area_${player.roomId}`).emit('playerStateUpdate', data);
             }
         } catch (error) {
             console.error('❌ State update error:', error);
         }
     });
 
-    // 💬 Chat Bubble
     socket.on('bubbleMessage', (data) => {
         try {
             const { playerId, message, username, adminLevel } = data;
             const player = gameState.players.get(playerId);
             
-            if (player && message && message.trim()) {
+            if (player) {
                 console.log(`💬 ${username}: ${message}`);
-                
                 broadcastToRoom(player.roomId, 'bubbleMessage', {
                     playerId,
-                    message: message.trim(),
+                    message,
                     username,
                     adminLevel,
                     timestamp: Date.now()
                 });
             }
         } catch (error) {
-            console.error('❌ Bubble message error:', error);
+            console.error('❌ Bubble error:', error);
         }
     });
 
-    // 👗 Appearance Change
     socket.on('playerAppearanceChange', (data) => {
         try {
             const { playerId } = data;
             const player = gameState.players.get(playerId);
             
             if (player) {
-                Object.assign(player, {
-                    skin_code: data.skin_code,
-                    equipped_hair: data.equipped_hair,
-                    equipped_top: data.equipped_top,
-                    equipped_pants: data.equipped_pants,
-                    equipped_hat: data.equipped_hat,
-                    equipped_halo: data.equipped_halo,
-                    equipped_necklace: data.equipped_necklace,
-                    equipped_accessories: data.equipped_accessories,
-                    equipped_shoes: data.equipped_shoes,
-                    equipped_gloves: data.equipped_gloves
-                });
-                
+                Object.assign(player, data);
                 console.log(`👗 ${player.username} changed appearance`);
-                
                 socket.to(`area_${player.roomId}`).emit('playerAppearanceUpdate', {
                     ...data,
                     username: player.username
                 });
             }
         } catch (error) {
-            console.error('❌ Appearance change error:', error);
+            console.error('❌ Appearance error:', error);
         }
     });
 
-    // 💤 AFK Status
     socket.on('playerAfk', (data) => {
         try {
             const { playerId, isAfk } = data;
@@ -248,26 +205,19 @@ io.on('connection', (socket) => {
             
             if (player) {
                 player.isAfk = isAfk;
-                console.log(`💤 ${player.username} is ${isAfk ? 'AFK' : 'back'}`);
-                
-                broadcastToRoom(player.roomId, 'playerAfkUpdate', {
-                    playerId,
-                    isAfk
-                });
+                broadcastToRoom(player.roomId, 'playerAfkUpdate', { playerId, isAfk });
             }
         } catch (error) {
-            console.error('❌ AFK update error:', error);
+            console.error('❌ AFK error:', error);
         }
     });
 
-    // 🤝 Trade Requests
     socket.on('tradeRequest', (data) => {
         try {
             const { tradeId, initiatorId, receiverId } = data;
-            console.log(`🤝 Trade request: ${initiatorId} → ${receiverId}`);
-            
             const receiver = gameState.players.get(receiverId);
-            if (receiver?.socketId) {
+            
+            if (receiver) {
                 io.to(receiver.socketId).emit('tradeRequest', { tradeId, initiatorId, receiverId });
             }
         } catch (error) {
@@ -278,84 +228,67 @@ io.on('connection', (socket) => {
     socket.on('tradeUpdate', (data) => {
         try {
             const { tradeId, status } = data;
-            console.log(`🔄 Trade update: ${tradeId} → ${status}`);
-            
-            // Broadcast to all players in the trade
             io.emit('tradeUpdate', { tradeId, status });
         } catch (error) {
             console.error('❌ Trade update error:', error);
         }
     });
 
-    // 🚪 Player Disconnect
     socket.on('disconnect', () => {
-        try {
-            let disconnectedPlayer = null;
-            
-            for (const [playerId, player] of gameState.players.entries()) {
-                if (player.socketId === socket.id) {
-                    disconnectedPlayer = player;
-                    gameState.players.delete(playerId);
-                    
-                    socket.to(`area_${player.roomId}`).emit('playerLeft', { playerId });
-                    console.log(`👋 ${player.username} disconnected`);
-                    break;
-                }
+        console.log('❌ Player disconnected:', socket.id);
+        
+        for (const [playerId, player] of gameState.players.entries()) {
+            if (player.socketId === socket.id) {
+                const roomId = player.roomId;
+                gameState.players.delete(playerId);
+                
+                broadcastToRoom(roomId, 'playerLeft', { playerId });
+                console.log(`👋 ${player.username} left`);
+                break;
             }
-        } catch (error) {
-            console.error('❌ Disconnect error:', error);
         }
     });
 });
 
-// 🏥 Health Check Endpoint
+// 🔄 Periodic Updates
+setInterval(() => {
+    for (const [roomId] of gameState.rooms) {
+        const players = getRoomPlayers(roomId);
+        broadcastToRoom(roomId, 'playersUpdate', { players });
+    }
+}, 5000);
+
+setInterval(cleanupInactivePlayers, 30000);
+
+// 🏥 Health Check
 app.get('/health', (req, res) => {
-    const uptime = (Date.now() - gameState.startTime) / 1000;
-    const playerCount = gameState.players.size;
-    
     res.json({
         status: 'ok',
-        players: playerCount,
-        uptime: uptime,
-        port: PORT,
-        timestamp: new Date().toISOString()
+        players: gameState.players.size,
+        rooms: gameState.rooms.size,
+        uptime: Math.floor((Date.now() - gameState.startTime) / 1000),
+        port: PORT
     });
 });
 
-// 📊 Stats Endpoint
-app.get('/stats', (req, res) => {
-    const rooms = {};
-    for (const [playerId, player] of gameState.players.entries()) {
-        const roomId = player.roomId || 'unknown';
-        rooms[roomId] = (rooms[roomId] || 0) + 1;
-    }
-    
+app.get('/', (req, res) => {
     res.json({
-        totalPlayers: gameState.players.size,
-        rooms: rooms,
-        uptime: (Date.now() - gameState.startTime) / 1000
+        name: 'Touch World Multiplayer Server',
+        version: '2.1.0',
+        status: 'running',
+        players: gameState.players.size
     });
 });
-
-// 🧹 Cleanup Task (every 5 minutes)
-setInterval(cleanupInactivePlayers, 5 * 60 * 1000);
 
 // 🚀 Start Server
 httpServer.listen(PORT, '0.0.0.0', () => {
-    console.log('═══════════════════════════════════════════════════════════');
+    console.log('═══════════════════════════════════════');
     console.log('🎮 TOUCH WORLD MULTIPLAYER SERVER');
-    console.log('═══════════════════════════════════════════════════════════');
+    console.log('═══════════════════════════════════════');
     console.log(`✅ Server running on port ${PORT}`);
     console.log(`🌐 Health check: http://localhost:${PORT}/health`);
-    console.log(`📊 Stats: http://localhost:${PORT}/stats`);
-    console.log('═══════════════════════════════════════════════════════════');
+    console.log(`🔌 WebSocket ready for connections`);
+    console.log('═══════════════════════════════════════');
 });
 
-// 🛡️ Error Handling
-process.on('uncaughtException', (error) => {
-    console.error('❌ Uncaught Exception:', error);
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-    console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
-});
+export default httpServer;
