@@ -1,6 +1,6 @@
 {
   "name": "touch-world-server",
-  "version": "1.0.2",
+  "version": "1.0.4",
   "description": "Real-time multiplayer server for Touch World",
   "main": "server.js",
   "type": "module",
