@@ -1,0 +1,16 @@
+{
+  "name": "touch-world-server",
+  "version": "1.0.1",
+  "description": "Real-time multiplayer server for Touch World",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "socket.io": "^4.7.5"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
