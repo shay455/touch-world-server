@@ -2,25 +2,11 @@ import express from 'express';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
-import { createClient } from '@supabase/supabase-js';
 
-// 🔐 Environment Variables
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const PORT = process.env.PORT || 3000;
+// 🌐 Environment Variables
+const PORT = process.env.PORT || 10000;
 
-// ⚠️ Validate Environment Variables
-if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
-    console.error('❌ Missing required environment variables:');
-    console.error('SUPABASE_URL:', SUPABASE_URL ? '✅' : '❌');
-    console.error('SUPABASE_SERVICE_ROLE_KEY:', SUPABASE_SERVICE_KEY ? '✅' : '❌');
-    process.exit(1);
-}
-
-// 🗄️ Supabase Client
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
-
-// 🌐 Express App
+// 🚀 Express App
 const app = express();
 const httpServer = createServer(app);
 
@@ -73,61 +59,61 @@ const io = new Server(httpServer, {
     connectTimeout: 45000
 });
 
-// 📊 Game State (In-Memory)
+// 📊 Game State (In-Memory Only)
 const gameState = {
-    rooms: new Map(),
     players: new Map(),
     startTime: Date.now()
 };
 
-// 🏠 Room Management
+// 🏠 Helper Functions
 function getRoomPlayers(roomId) {
-    return Array.from(gameState.players.values()).filter(p => p.roomId === roomId);
+    return Array.from(gameState.players.values())
+        .filter(p => p.roomId === roomId)
+        .map(p => ({
+            id: p.id,
+            username: p.username,
+            position_x: p.position_x,
+            position_y: p.position_y,
+            direction: p.direction,
+            skin_code: p.skin_code,
+            equipped_hair: p.equipped_hair,
+            equipped_top: p.equipped_top,
+            equipped_pants: p.equipped_pants,
+            equipped_hat: p.equipped_hat,
+            equipped_halo: p.equipped_halo,
+            equipped_necklace: p.equipped_necklace,
+            equipped_accessories: p.equipped_accessories,
+            admin_level: p.admin_level,
+            is_invisible: p.is_invisible,
+            is_moving: p.is_moving,
+            animation_frame: p.animation_frame
+        }));
 }
 
 function broadcastToRoom(roomId, event, data) {
     io.to(`area_${roomId}`).emit(event, data);
 }
 
-// 💾 Update Player in Supabase
-async function updatePlayerInDB(playerId, updates) {
-    try {
-        const { data, error } = await supabase
-            .from('players')
-            .update(updates)
-            .eq('id', playerId);
-        
-        if (error) {
-            console.error('❌ Failed to update player in DB:', error);
-        }
-    } catch (error) {
-        console.error('❌ Supabase error:', error);
-    }
-}
-
 // 🔌 Socket.IO Connection Handler
 io.on('connection', (socket) => {
-    console.log('✅ New player connected:', socket.id);
+    console.log('✅ Player connected:', socket.id);
 
-    // 👋 Player Join Room
-    socket.on('join', async (data) => {
+    // 👋 Join Room
+    socket.on('join', (data) => {
         try {
             const { playerId, areaId, playerData } = data;
-            
-            console.log(`👤 Player ${playerData.username} joining area: ${areaId}`);
+            console.log(`👤 ${playerData.username} joining ${areaId}`);
 
             // Leave previous room
             const currentPlayer = gameState.players.get(playerId);
             if (currentPlayer?.roomId) {
                 socket.leave(`area_${currentPlayer.roomId}`);
-                console.log(`🚪 Player left area: ${currentPlayer.roomId}`);
             }
 
             // Join new room
             socket.join(`area_${areaId}`);
-            console.log(`🚪 Player joined area: ${areaId}`);
             
-            // Update player state in memory
+            // Store player state
             gameState.players.set(playerId, {
                 ...playerData,
                 socketId: socket.id,
@@ -136,40 +122,29 @@ io.on('connection', (socket) => {
                 isAfk: false
             });
 
-            // Update player in database
-            await updatePlayerInDB(playerId, {
-                current_area: areaId,
-                is_online: true,
-                last_activity: new Date().toISOString()
-            });
-
-            // Send current room players to new player
+            // Send current players to new player
             const roomPlayers = getRoomPlayers(areaId);
             socket.emit('playersUpdate', { players: roomPlayers });
 
-            // Notify others about new player
+            // Notify others
             socket.to(`area_${areaId}`).emit('playerJoined', playerData);
 
-            console.log(`✅ Player ${playerData.username} joined successfully (${roomPlayers.length} players in room)`);
+            console.log(`✅ ${playerData.username} joined (${roomPlayers.length} players)`);
         } catch (error) {
             console.error('❌ Join error:', error);
-            socket.emit('error', { message: 'Failed to join room' });
         }
     });
 
-    // 🏃 Player Movement/State Update
+    // 🏃 Player State Update
     socket.on('playerState', (data) => {
         try {
             const player = gameState.players.get(data.id);
             if (player) {
-                // Update in-memory state
                 Object.assign(player, data, { lastUpdate: Date.now() });
-                
-                // Broadcast to others in room
                 socket.to(`area_${player.roomId}`).emit('playerStateUpdate', data);
             }
         } catch (error) {
-            console.error('❌ Player state error:', error);
+            console.error('❌ State update error:', error);
         }
     });
 
@@ -181,7 +156,6 @@ io.on('connection', (socket) => {
             
             if (player) {
                 console.log(`💬 ${username}: ${message}`);
-                
                 broadcastToRoom(player.roomId, 'bubbleMessage', {
                     playerId,
                     message,
@@ -191,7 +165,7 @@ io.on('connection', (socket) => {
                 });
             }
         } catch (error) {
-            console.error('❌ Bubble message error:', error);
+            console.error('❌ Bubble error:', error);
         }
     });
 
@@ -203,11 +177,7 @@ io.on('connection', (socket) => {
             
             if (player) {
                 console.log(`👗 ${player.username} changed appearance`);
-                
-                // Update in-memory state
                 Object.assign(player, data);
-                
-                // Broadcast to others in room
                 socket.to(`area_${player.roomId}`).emit('playerAppearanceUpdate', {
                     ...data,
                     id: playerId,
@@ -215,7 +185,7 @@ io.on('connection', (socket) => {
                 });
             }
         } catch (error) {
-            console.error('❌ Appearance change error:', error);
+            console.error('❌ Appearance error:', error);
         }
     });
 
@@ -227,12 +197,11 @@ io.on('connection', (socket) => {
             
             if (player) {
                 player.isAfk = isAfk;
-                console.log(`💤 ${player.username} is ${isAfk ? 'AFK' : 'back'}`);
-                
+                console.log(`💤 ${player.username} ${isAfk ? 'AFK' : 'back'}`);
                 broadcastToRoom(player.roomId, 'playerAfkUpdate', { playerId, isAfk });
             }
         } catch (error) {
-            console.error('❌ AFK status error:', error);
+            console.error('❌ AFK error:', error);
         }
     });
 
@@ -243,12 +212,8 @@ io.on('connection', (socket) => {
             const receiver = gameState.players.get(receiverId);
             
             if (receiver) {
-                console.log(`🤝 Trade request: ${initiatorId} → ${receiverId}`);
-                io.to(receiver.socketId).emit('tradeRequest', { 
-                    tradeId, 
-                    initiatorId, 
-                    receiverId 
-                });
+                console.log(`🤝 Trade: ${initiatorId} → ${receiverId}`);
+                io.to(receiver.socketId).emit('tradeRequest', { tradeId, initiatorId, receiverId });
             }
         } catch (error) {
             console.error('❌ Trade request error:', error);
@@ -259,7 +224,7 @@ io.on('connection', (socket) => {
     socket.on('tradeUpdate', (data) => {
         try {
             const { tradeId, status } = data;
-            console.log(`🔄 Trade ${tradeId} status: ${status}`);
+            console.log(`🔄 Trade ${tradeId}: ${status}`);
             io.emit('tradeUpdate', { tradeId, status });
         } catch (error) {
             console.error('❌ Trade update error:', error);
@@ -267,27 +232,16 @@ io.on('connection', (socket) => {
     });
 
     // 🚪 Disconnect
-    socket.on('disconnect', async () => {
+    socket.on('disconnect', () => {
         try {
             console.log('❌ Player disconnected:', socket.id);
             
             for (const [playerId, player] of gameState.players.entries()) {
                 if (player.socketId === socket.id) {
                     const roomId = player.roomId;
-                    
-                    // Remove from memory
                     gameState.players.delete(playerId);
-                    
-                    // Update database
-                    await updatePlayerInDB(playerId, {
-                        is_online: false,
-                        last_activity: new Date().toISOString()
-                    });
-                    
-                    // Notify others
                     broadcastToRoom(roomId, 'playerLeft', { playerId });
-                    
-                    console.log(`👋 Player ${player.username} left (${getRoomPlayers(roomId).length} remaining)`);
+                    console.log(`👋 ${player.username} left`);
                     break;
                 }
             }
@@ -297,38 +251,31 @@ io.on('connection', (socket) => {
     });
 });
 
-// 🔄 Periodic Room Updates (every 5 seconds)
+// 🔄 Periodic Updates (every 5 seconds)
 setInterval(() => {
     try {
-        for (const [roomId] of gameState.rooms) {
+        const rooms = new Set(Array.from(gameState.players.values()).map(p => p.roomId));
+        for (const roomId of rooms) {
             const players = getRoomPlayers(roomId);
             if (players.length > 0) {
                 broadcastToRoom(roomId, 'playersUpdate', { players });
             }
         }
     } catch (error) {
-        console.error('❌ Periodic update error:', error);
+        console.error('❌ Update error:', error);
     }
 }, 5000);
 
-// 🧹 Cleanup Inactive Players (every 30 seconds)
+// 🧹 Cleanup Inactive (every 30 seconds)
 setInterval(() => {
     try {
         const now = Date.now();
-        const TIMEOUT = 60000; // 1 minute
-        
         for (const [playerId, player] of gameState.players.entries()) {
-            if (now - player.lastUpdate > TIMEOUT) {
+            if (now - player.lastUpdate > 60000) {
                 const roomId = player.roomId;
                 gameState.players.delete(playerId);
                 broadcastToRoom(roomId, 'playerLeft', { playerId });
-                console.log(`🧹 Removed inactive player: ${player.username}`);
-                
-                // Update database
-                updatePlayerInDB(playerId, {
-                    is_online: false,
-                    last_activity: new Date().toISOString()
-                });
+                console.log(`🧹 Removed inactive: ${player.username}`);
             }
         }
     } catch (error) {
@@ -336,30 +283,24 @@ setInterval(() => {
     }
 }, 30000);
 
-// 🏥 Health Check Endpoint
+// 🏥 Health Check
 app.get('/health', (req, res) => {
     res.json({
         status: 'ok',
         players: gameState.players.size,
-        rooms: gameState.rooms.size,
         uptime: (Date.now() - gameState.startTime) / 1000,
-        env: {
-            supabase_url: SUPABASE_URL ? '✅' : '❌',
-            supabase_key: SUPABASE_SERVICE_KEY ? '✅' : '❌',
-            port: PORT
-        }
+        port: PORT
     });
 });
 
 // 🚀 Start Server
 httpServer.listen(PORT, '0.0.0.0', () => {
     console.log('═══════════════════════════════════════════════════');
-    console.log('🎮 Touch World Multiplayer Server v2.0');
+    console.log('🎮 Touch World Multiplayer Server v2.1');
     console.log('═══════════════════════════════════════════════════');
-    console.log(`✅ Server running on port ${PORT}`);
-    console.log(`🌐 WebSocket ready for connections`);
-    console.log(`🗄️  Supabase: ${SUPABASE_URL ? '✅ Connected' : '❌ Not configured'}`);
-    console.log(`📍 Health check: http://0.0.0.0:${PORT}/health`);
+    console.log(`✅ Server: http://0.0.0.0:${PORT}`);
+    console.log(`🌐 WebSocket ready`);
+    console.log(`📍 Health: http://0.0.0.0:${PORT}/health`);
     console.log('═══════════════════════════════════════════════════');
 });
 
