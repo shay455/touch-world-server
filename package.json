@@ -1,7 +1,7 @@
 {
-  "name": "touch-world-server",
-  "version": "1.0.0",
-  "description": "Touch World Real-time Game Server",
+  "name": "touch-world-server-flat",
+  "version": "2.0.0",
+  "description": "Simplified and robust real-time server for Touch World",
   "type": "module",
   "main": "server.js",
   "scripts": {
