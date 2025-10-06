@@ -1,14 +1,22 @@
 {
   "name": "touch-world-server",
-  "version": "2.9.0",
+  "version": "3.0.0",
+  "description": "Touch World Multiplayer Server - Perfect Sync",
   "type": "module",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "dev": "node --watch server.js"
   },
+  "keywords": ["multiplayer", "game", "socketio", "touch-world"],
+  "author": "Touch World Team",
+  "license": "MIT",
   "dependencies": {
     "express": "^4.18.2",
     "socket.io": "^4.6.1",
     "cors": "^2.8.5"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
