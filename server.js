@@ -1,11 +1,10 @@
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 
-// --- הגדרות ---
 const PORT = process.env.PORT || 3001;
-const PLAYER_SYNC_INTERVAL = 50; // ms
+const PLAYER_SYNC_INTERVAL = 50; // ms for player position updates
 
-// --- מערכת לוגים ---
+// --- מערכת לוגים צבעונית ---
 const colors = { reset: '\x1b[0m', bright: '\x1b[1m', red: '\x1b[31m', green: '\x1b[32m', yellow: '\x1b[33m', magenta: '\x1b[35m', cyan: '\x1b[36m' };
 const timestamp = () => new Date().toLocaleTimeString('he-IL', { hour12: false });
 const Logger = {
@@ -34,14 +33,14 @@ const corsOptions = {
     credentials: true,
 };
 
-// --- יצירת שרת ---
+// --- יצירת שרת HTTP ---
 const httpServer = createServer((req, res) => {
     if (req.url === '/health' && req.method === 'GET') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'ok', players: players.size }));
+        res.end(JSON.stringify({ status: 'ok', playersOnline: players.size }));
     } else {
-        res.writeHead(404);
-        res.end();
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Not Found' }));
     }
 });
 
@@ -49,23 +48,27 @@ const io = new Server(httpServer, { cors: corsOptions });
 
 // --- לוגיקת Socket.IO ---
 io.on('connection', (socket) => {
-    Logger.connection('New connection', { socketId: socket.id });
+    Logger.connection('New client connected', { socketId: socket.id });
 
+    // מטפל בכניסת שחקן לעולם או החלפת אזור
     socket.on('playerState', (state) => {
-        if (!state || !state.id) return;
+        if (!state || !state.id || !state.current_area) return;
         
         const existingPlayer = players.get(state.id);
         
-        if (!existingPlayer) { // שחקן חדש נכנס
-            Logger.player('JOIN', { user: state.username, area: state.current_area });
+        // אם השחקן לא היה קיים, או שהחליף אזור
+        if (!existingPlayer || existingPlayer.current_area !== state.current_area) {
+            if (existingPlayer) { // עזיבת אזור ישן
+                socket.leave(existingPlayer.current_area);
+                io.to(existingPlayer.current_area).emit('playerLeft', { playerId: state.id });
+                Logger.player('LEFT AREA', { user: state.username, area: existingPlayer.current_area });
+            }
+            // כניסה לאזור חדש
             socket.join(state.current_area);
-        } else if (existingPlayer.current_area !== state.current_area) { // שחקן מחליף אזור
-            Logger.player('AREA CHANGE', { user: state.username, from: existingPlayer.current_area, to: state.current_area });
-            socket.leave(existingPlayer.current_area);
-            io.to(existingPlayer.current_area).emit('playerLeft', { playerId: state.id });
-            socket.join(state.current_area);
+            Logger.player('JOINED AREA', { user: state.username, area: state.current_area });
         }
         
+        // עדכון מצב השחקן
         players.set(state.id, { ...state, socketId: socket.id });
     });
 
@@ -73,35 +76,39 @@ io.on('connection', (socket) => {
         const player = [...players.values()].find(p => p.socketId === socket.id);
         if (player && player.current_area) {
             Logger.chat(data.username, data.message, player.current_area);
+            // שולח את הודעת הבועה לכל השחקנים באותו אזור
             io.to(player.current_area).emit('bubbleMessage', data);
         }
     });
 
     socket.on('disconnect', () => {
-        Logger.connection('Disconnect', { socketId: socket.id });
+        Logger.connection('Client disconnected', { socketId: socket.id });
         for (const [playerId, player] of players.entries()) {
             if (player.socketId === socket.id) {
                 players.delete(playerId);
-                io.emit('playerLeft', { playerId }); // שולח לכולם שהשחקן עזב
-                Logger.player('LEAVE', { user: player.username });
+                // מודיע לכל שאר השחקנים בכל האזורים שהשחקן עזב
+                io.emit('playerLeft', { playerId });
+                Logger.player('DISCONNECTED', { user: player.username });
                 break;
             }
         }
     });
 });
 
-// --- לולאת סנכרון ---
+// --- לולאת סנכרון מרכזית ---
 setInterval(() => {
+    // יוצר רשימה ייחודית של כל האזורים הפעילים
     const areasToUpdate = new Set([...players.values()].map(p => p.current_area));
     
     for (const areaId of areasToUpdate) {
         if (!areaId) continue;
         const playersInArea = [...players.values()].filter(p => p.current_area === areaId);
+        // שולח עדכון מלא של כל השחקנים באזור רק למי שנמצא באותו אזור
         io.to(areaId).emit('playersUpdate', { players: playersInArea });
     }
 }, PLAYER_SYNC_INTERVAL);
 
 // --- הרצת השרת ---
 httpServer.listen(PORT, () => {
-    Logger.success(`🚀 Touch World Server is live on port ${PORT}`);
+    Logger.success(`🚀 Touch World Server is live and running on port ${PORT}`);
 });
