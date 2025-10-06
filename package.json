@@ -1,16 +1,14 @@
 {
   "name": "touch-world-server",
-  "version": "1.2.0",
-  "description": "Real-time server for Touch World Game with Base44 Integration",
-  "main": "server.js",
+  "version": "1.0.0",
+  "description": "Touch World Real-time Game Server",
   "type": "module",
+  "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js"
+    "start": "node server.js"
   },
   "dependencies": {
-    "socket.io": "^4.7.5",
-    "@base44/sdk-node": "^0.1.3"
+    "socket.io": "^4.7.5"
   },
   "engines": {
     "node": ">=18.0.0"
