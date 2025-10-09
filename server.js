@@ -1,12 +1,10 @@
-// Switched from 'import' to 'require' to bypass a platform validation issue.
-// This code is functionally identical for the Node.js environment on Render.
-require('dotenv').config();
-const { WebSocketServer } = require('ws');
-const { createClient } = require('@base44/sdk');
-const express = require('express');
-const http = require('node:http');
-const cors = require('cors');
-const { URL } = require('node:url');
+import 'dotenv/config';
+import { WebSocketServer } from 'ws';
+import { createClient } from '@base44/sdk';
+import express from 'express';
+import http from 'node:http';
+import cors from 'cors';
+import { URL } from 'node:url';
 
 // Advanced workaround for platform linter complaining about 'process' and 'global'
 const _process = (new Function('return this'))().process;
