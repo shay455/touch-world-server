@@ -1,11 +1,12 @@
 {
-  "name": "touch-world-server",
+  "name": "touch-world-external-server",
   "version": "1.0.0",
-  "description": "Realtime server for Touch World",
+  "description": "External Realtime Server for Touch World",
   "main": "server.js",
   "type": "module",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "dev": "node --watch server.js"
   },
   "dependencies": {
     "@base44/sdk": "^0.7.1",
