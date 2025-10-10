@@ -1,26 +1,27 @@
 import { Server } from "npm:socket.io@4.7.5";
-import { cors } from "npm:hono@4.2.5/cors";
 
 const players = {};
 
-// CORS middleware setup for standard HTTP requests
-const corsMiddleware = cors({
-  origin: ["https://touch-world.io", "http://localhost:5173", "http://localhost:8081"],
-  allowHeaders: ['X-Custom-Header', 'Upgrade-Insecure-Requests'],
-  allowMethods: ['POST', 'GET', 'OPTIONS'],
-  credentials: true,
-});
+// הגדרת כתובות מורשות להתחבר לשרת
+const allowedOrigins = [
+  "https://touch-world.io/", // הדומיין הרשמי של המשחק (לסביבת Production)
+  "http://localhost:5173/", // כתובת לפיתוח מקומי
+  "http://localhost:8081/"  // כתובת נוספת לפיתוח
+];
 
 const io = new Server({
+    path: "/socket.io", // הגדרה מפורשת של הנתיב
     cors: {
-        origin: ["https://touch-world.io", "http://localhost:5173", "http://localhost:8081"],
+        origin: allowedOrigins,
         methods: ["GET", "POST"],
         credentials: true
-    }
+    },
+    // מאפשר ל-Socket.IO לעבוד עם long-polling כגיבוי
+    transports: ['websocket', 'polling'], 
 });
 
 io.on("connection", (socket) => {
-    console.log(`[+] A user connected: ${socket.id}`);
+    console.log([+] A user connected: ${socket.id});
 
     players[socket.id] = {
         id: socket.id,
@@ -42,7 +43,7 @@ io.on("connection", (socket) => {
     });
 
     socket.on("chat_message", (chatData) => {
-        console.log(`[CHAT] ${chatData.username}: ${chatData.message}`);
+        console.log([CHAT] ${chatData.username}: ${chatData.message});
         io.emit("new_chat_message", {
             playerId: socket.id,
             message: chatData.message,
@@ -53,12 +54,12 @@ io.on("connection", (socket) => {
     });
 
     socket.on("trade_request", (data) => {
-        console.log(`[TRADE] Request from ${data.initiatorId} to ${data.receiverId}`);
+        console.log([TRADE] Request from ${data.initiatorId} to ${data.receiverId});
         io.to(data.receiverId).emit("trade_request_received", data);
     });
 
     socket.on("trade_update", (data) => {
-        console.log(`[TRADE] Update for trade ${data.tradeId}, status: ${data.status}`);
+        console.log([TRADE] Update for trade ${data.tradeId}, status: ${data.status});
         const trade = data.tradeDetails;
         if (trade) {
             const otherPlayerId = socket.id === trade.initiator_id ? trade.receiver_id : trade.initiator_id;
@@ -67,34 +68,49 @@ io.on("connection", (socket) => {
     });
 
     socket.on("disconnect", () => {
-        console.log(`[-] User disconnected: ${socket.id}`);
+        console.log([-] User disconnected: ${socket.id});
         delete players[socket.id];
         io.emit("player_disconnected", socket.id);
     });
 });
 
-// The main HTTP handler
-async function handler(req) {
-    // Handle CORS preflight requests for standard HTTP endpoints
-    if (req.method === 'OPTIONS') {
-        const request = new Request(req.url, { headers: req.headers });
-        return await corsMiddleware(request, async () => new Response(null, { status: 204 }))
-    }
-    
-    // Check if the request is for the health check endpoint
+// The main HTTP handler for the Deno function
+function handler(req) {
     const url = new URL(req.url);
-    if (url.pathname === '/') {
+
+    // Health check endpoint
+    if (url.pathname.endsWith('/server') && req.method === 'GET') {
          return new Response(
             JSON.stringify({
                 status: 'ok',
                 message: 'Touch World Realtime Server is running.',
                 connected_players: Object.keys(players).length
             }),
-            { headers: { "Content-Type": "application/json" } }
+            { 
+                status: 200,
+                headers: { "Content-Type": "application/json" }
+            }
         );
     }
-    
-    // Upgrade the request to a WebSocket connection for Socket.IO
+
+    // Handle CORS preflight requests
+    if (req.method === 'OPTIONS') {
+        const origin = req.headers.get("Origin");
+        if (origin && allowedOrigins.includes(origin)) {
+             return new Response(null, {
+                status: 204, // No Content
+                headers: {
+                    'Access-Control-Allow-Origin': origin,
+                    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+                    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+                    'Access-Control-Allow-Credentials': 'true',
+                },
+            });
+        }
+       return new Response(null, { status: 204 });
+    }
+
+    // Pass other requests to Socket.IO handler
     return io.handler(req);
 }
 
