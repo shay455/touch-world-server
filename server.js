@@ -40,7 +40,7 @@ app.get('/', (req, res) => {
     status: 'ok',
     message: 'Touch World WebSocket Server is running.',
     connected_players_count: Object.keys(players).length,
-    areas: Object.keys(areaSockets).map(area => ({ area, count: areaSockets[area].size })),
+    areas: Object.keys(areaSockets).map(area => ({ area, count: areaSockets[area] ? areaSockets[area].size : 0 })),
   });
 });
 
@@ -68,24 +68,30 @@ function safePlayerView(p) {
   };
 }
 
-function broadcast(area, message, excludeId = null) {
+function broadcastToArea(area, message) {
     if (!areaSockets[area]) return;
     const stringifiedMessage = JSON.stringify(message);
     areaSockets[area].forEach(client => {
-        if (client.id !== excludeId && client.readyState === client.OPEN) {
+        if (client.readyState === client.OPEN) {
             client.send(stringifiedMessage);
         }
     });
 }
 
-function broadcastToAll(area, message) {
-    if (!areaSockets[area]) return;
-    const stringifiedMessage = JSON.stringify(message);
-     areaSockets[area].forEach(client => {
-        if (client.readyState === client.OPEN) {
-            client.send(stringifiedMessage);
-        }
-    });
+function getPlayersInArea(area) {
+    const playersInArea = {};
+    if (areaSockets[area]) {
+        areaSockets[area].forEach(client => {
+            const p = players[client.id];
+            if (p) {
+                const view = safePlayerView(p);
+                if (view) {
+                    playersInArea[p.id] = view;
+                }
+            }
+        });
+    }
+    return playersInArea;
 }
 
 
@@ -114,109 +120,102 @@ wss.on('connection', (ws) => {
     areaSockets[ws.area] = new Set();
   }
   areaSockets[ws.area].add(ws);
+  
+  // Send the new player their ID
+  ws.send(JSON.stringify({ type: 'welcome', payload: { id: ws.id } }));
 
-  // Send current players in the area to the new client
-  const currentPlayersInArea = Object.values(players)
-    .filter(p => p.area === ws.area && p.id !== ws.id)
-    .map(safePlayerView)
-    .filter(Boolean);
-    
-  ws.send(JSON.stringify({ type: 'current_players', payload: currentPlayersInArea }));
+  // Send current players in the area to the new player
+  ws.send(JSON.stringify({ type: 'current_players', payload: { players: getPlayersInArea(ws.area) } }));
 
-  ws.on('message', (rawMessage) => {
+  ws.on('message', (message) => {
     try {
-      const message = JSON.parse(rawMessage);
+      const { type, payload } = JSON.parse(message);
       const player = players[ws.id];
       if (!player) return;
 
-      switch (message.type) {
-        case 'player_update': {
+      switch (type) {
+        case 'player_update':
           const hadUsername = !!player.username;
-          Object.assign(player, message.payload); // Merge updates
-          
-          const view = safePlayerView(player);
-          if (!view) return;
+          Object.assign(player, payload); // Update server state
 
-          // If username was just set, broadcast 'player_joined'
-          if (!hadUsername && player.username) {
-            console.log(`[+] Player ${ws.id} identified as ${player.username}`);
-            broadcastToAll(ws.area, { type: 'player_joined', payload: view });
-          } else {
-            // Otherwise, it's a movement update
-            broadcastToAll(ws.area, { type: 'player_moved', payload: view });
+          const view = safePlayerView(player);
+          if (view) {
+             if (!hadUsername && player.username) {
+                console.log(`[+] Player ${ws.id} is now identified as ${player.username}`);
+                broadcastToArea(ws.area, { type: 'player_joined', payload: { player: view } });
+             } else {
+                broadcastToArea(ws.area, { type: 'player_moved', payload: { player: view } });
+             }
           }
           break;
-        }
-        
-        case 'area_change': {
-            const newArea = message.payload.area;
-            if (newArea === ws.area) return;
-
-            // Notify old area
-            broadcast(ws.area, { type: 'player_left', payload: { playerId: ws.id } });
-            areaSockets[ws.area]?.delete(ws);
-
-            // Update state
-            player.area = newArea;
-            ws.area = newArea;
-
-            // Join new area
-            if (!areaSockets[newArea]) areaSockets[newArea] = new Set();
-            areaSockets[newArea].add(ws);
-            
-            // Notify new area
-            broadcast(newArea, { type: 'player_joined', payload: safePlayerView(player) }, ws.id);
-
-            // Send new area's player list to the client
-            const playersInNewArea = Object.values(players)
-                .filter(p => p.area === newArea && p.id !== ws.id)
-                .map(safePlayerView)
-                .filter(Boolean);
-            ws.send(JSON.stringify({ type: 'current_players', payload: playersInNewArea }));
-            break;
-        }
 
         case 'chat_message':
-          broadcastToAll(ws.area, {
-            type: 'bubble_message',
-            payload: {
+            broadcastToArea(ws.area, { type: 'new_chat_message', payload: { 
               playerId: ws.id,
-              ...message.payload,
-            },
-          });
-          break;
-        
+              username: payload.username,
+              message: payload.message,
+              adminLevel: payload.adminLevel
+            }});
+            break;
+            
         case 'equipment_change':
-            player.equipment = message.payload.equipment;
-            broadcastToAll(ws.area, {
-                type: 'player_equipment_changed',
-                payload: { id: ws.id, equipment: player.equipment }
-            });
+             if (payload.equipment) {
+                player.equipment = payload.equipment;
+                broadcastToArea(ws.area, { type: 'player_equipment_changed', payload: { id: ws.id, equipment: player.equipment } });
+            }
             break;
 
-        // Handle trade and other events similarly
+        case 'area_change':
+          const newArea = payload.area;
+          if (newArea && ws.area !== newArea) {
+            // Remove from old area
+            if(areaSockets[ws.area]) {
+                areaSockets[ws.area].delete(ws);
+            }
+            broadcastToArea(ws.area, { type: 'player_disconnected', payload: { playerId: ws.id } });
+
+            // Add to new area
+            ws.area = newArea;
+            player.area = newArea;
+            if (!areaSockets[newArea]) {
+              areaSockets[newArea] = new Set();
+            }
+            areaSockets[newArea].add(ws);
+
+            // Send new area's player list to the client
+            ws.send(JSON.stringify({ type: 'current_players', payload: { players: getPlayersInArea(newArea) } }));
+            
+            // Announce arrival in new area
+            const playerView = safePlayerView(player);
+            if(playerView){
+                broadcastToArea(newArea, { type: 'player_joined', payload: { player: playerView } });
+            }
+          }
+          break;
       }
     } catch (error) {
-      console.error('Failed to process message:', error);
+      console.error(`Error processing message from ${ws.id}:`, error);
     }
   });
 
   ws.on('close', () => {
     console.log(`[-] Player disconnected: ${ws.id}`);
-    const player = players[ws.id];
-    if (player && areaSockets[player.area]) {
-      areaSockets[player.area].delete(ws);
-      broadcast(player.area, { type: 'player_left', payload: { playerId: ws.id } });
+    const playerArea = players[ws.id]?.area;
+    if (playerArea && areaSockets[playerArea]) {
+        areaSockets[playerArea].delete(ws);
+        if (areaSockets[playerArea].size === 0) {
+            delete areaSockets[playerArea];
+        }
     }
     delete players[ws.id];
+    broadcastToArea(playerArea, { type: 'player_disconnected', payload: { playerId: ws.id } });
   });
 
   ws.on('error', (error) => {
-    console.error(`WebSocket error for ${ws.id}:`, error);
+    console.error(`WebSocket error from ${ws.id}:`, error);
   });
 });
 
-// --- Start Server ---
 server.listen(PORT, () => {
-  console.log(`Touch World Server (WebSocket) listening on port ${PORT}`);
+  console.log(`🚀 Touch World Server listening on port ${PORT}`);
 });
