@@ -3,10 +3,8 @@
   "version": "1.0.0",
   "private": true,
   "main": "server.js",
-  "type": "commonjs",
   "scripts": {
-    "start": "node server.js",
-    "start:dev": "NODE_ENV=development node server.js"
+    "start": "node server.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
@@ -14,6 +12,6 @@
     "socket.io": "^4.7.5"
   },
   "engines": {
-    "node": "20.x"
+    "node": ">=18"
   }
 }
