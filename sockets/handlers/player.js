@@ -1,118 +1,138 @@
 // sockets/handlers/player.js
+'use strict';
 
 /**
- * ניהול אירועי שחקנים בצד השרת
- * נטען מתוך server.js דרך sockets/index.js
+ * רישום האנדלרים של שחקן בודד.
+ * @param {import('socket.io').Server} io
+ * @param {import('socket.io').Socket} socket
+ * @param {{
+ *   players: Record<string, any>,
+ *   safePlayerView: (p:any)=>any,
+ *   mergeRuntimeUpdate: (dst:any, src:any)=>void,
+ * }} deps
  */
+module.exports = function registerPlayerHandlers(io, socket, deps) {
+  const { players, safePlayerView, mergeRuntimeUpdate } = deps;
 
-module.exports = function registerPlayerHandlers(io, socket, players) {
-
-  /**
-   * כשהשחקן מתחבר (או מזהה את עצמו)
-   * נוודא שלא נוצרים כפילויות.
-   */
-  socket.on('identify', (data = {}) => {
-    const { id, username, user_id, admin_level, current_area, equipment } = data;
-
-    // מחפש אם כבר יש שחקן עם אותו user_id
-    const existingPlayerId = Object.keys(players).find(pid => players[pid].user_id === user_id);
-
-    // אם השחקן כבר קיים (נגיד חיבור מחדש) — מעדכן את הנתונים הקיימים
-    if (existingPlayerId) {
-      console.log(♻️ Reconnecting player: ${username} (${user_id}));
-
-      // מוחק את הרשומה הישנה
-      if (existingPlayerId !== socket.id) {
-        delete players[existingPlayerId];
-      }
-    } else {
-      console.log(✅ New player identified: ${username} (${user_id}));
-    }
-
-    // יוצר / מעדכן את השחקן החדש
+  // יצירת רשומת שחקן בסיסית (אם לא קיימת כבר)
+  if (!players[socket.id]) {
     players[socket.id] = {
       id: socket.id,
-      username,
-      user_id,
-      admin_level: admin_level || 'user',
-      current_area: current_area || 'city',
+      username: '',
       position_x: 600,
       position_y: 400,
       direction: 'front',
       animation_frame: 'idle',
       is_moving: false,
-      equipment: equipment || {},
-      is_invisible: !!data.is_invisible,
-      keep_away_mode: !!data.keep_away_mode
+      move_type: 'walk',
+      current_area: 'city',
+      equipment: {},
+      is_invisible: false,
+      keep_away_mode: false,
+      admin_level: 'user',
+      skin_code: 'blue',
+      ready: false
     };
+  }
 
-    // שולח לכל השחקנים את רשימת השחקנים המעודכנת
-    io.emit('current_players', players);
+  // שליחת כל השחקנים למתחבר החדש
+  const snapshot = {};
+  for (const [pid, pdata] of Object.entries(players)) {
+    snapshot[pid] = safePlayerView(pdata);
+  }
+  socket.emit('current_players', snapshot);
 
-    // מאשר ללקוח שהזהות נקלטה
-    socket.emit('identify_ok', players[socket.id]);
-  });
+  // מודיעים לכל היתר שיש שחקן חדש (עדיין בלי זהות מלאה)
+  socket.broadcast.emit('player_joined', safePlayerView(players[socket.id]));
 
   /**
-   * עדכון תנועה / מצב שחקן
+   * identify – שליחת זהות מלאה לאחר connect/reconnect
+   * מצופה לקבל: { username, user_id, admin_level, current_area, equipment, is_invisible, keep_away_mode, skin_code }
    */
-  socket.on('player_update', (update = {}) => {
+  socket.on('identify', (payload = {}) => {
     const p = players[socket.id];
     if (!p) return;
 
-    // נעדכן רק שדות רלוונטיים
-    const allowedFields = [
-      'position_x',
-      'position_y',
-      'direction',
-      'animation_frame',
-      'is_moving',
-      'equipment',
-      'is_invisible',
-      'keep_away_mode'
-    ];
+    const {
+      username = '',
+      user_id = null,
+      admin_level = 'user',
+      current_area = 'city',
+      equipment = {},
+      is_invisible = false,
+      keep_away_mode = false,
+      skin_code = 'blue'
+    } = payload;
 
-    for (const key of allowedFields) {
-      if (update[key] !== undefined) {
-        p[key] = update[key];
-      }
-    }
+    p.username = username;
+    p.user_id = user_id;
+    p.admin_level = admin_level;
+    p.current_area = current_area || 'city';
+    p.equipment = equipment || {};
+    p.is_invisible = !!is_invisible;
+    p.keep_away_mode = !!keep_away_mode;
+    p.skin_code = skin_code || 'blue';
+    p.ready = true;
 
-    socket.broadcast.emit('player_moved', p);
+    console.log(`♻️ Reconnecting/Identifying player: ${username} (${user_id || 'no-user-id'}) from socket ${socket.id}`);
+
+    // מאשרים לקליינט
+    socket.emit('identify_ok', safePlayerView(p));
+    // משדרים לכולם את המראה המעודכן
+    socket.broadcast.emit('player_moved', safePlayerView(p));
   });
 
   /**
-   * שינוי אזור
+   * עדכון מצב/תנועה בזמן אמת
+   * מצופה רק לשדות runtime (position_x, position_y, direction, animation_frame, is_moving, move_type, is_invisible, keep_away_mode, equipment)
+   */
+  socket.on('player_update', (payload = {}) => {
+    const p = players[socket.id];
+    if (!p) return;
+
+    mergeRuntimeUpdate(p, payload);
+    socket.broadcast.emit('player_moved', safePlayerView(p));
+  });
+
+  /**
+   * שינוי אזור מפורש
+   * מצופה: { area: string }
    */
   socket.on('area_change', (data = {}) => {
     const p = players[socket.id];
     if (!p) return;
 
     const nextArea = typeof data.area === 'string' ? data.area : 'city';
-    console.log(🌍 ${p.username} moved to area: ${nextArea});
     p.current_area = nextArea;
 
-    io.emit('player_area_changed', { id: p.id, current_area: nextArea });
+    console.log(`➡️ Area change: ${p.username || socket.id} -> ${p.current_area}`);
+    io.emit('player_area_changed', { id: p.id, current_area: p.current_area });
   });
 
   /**
    * שינוי ציוד
+   * אפשר לשגר או { slot, itemCode } או { equipment: {...} }
    */
   socket.on('equipment_change', (data = {}) => {
     const p = players[socket.id];
     if (!p) return;
 
-    if (data.slot && data.itemCode) {
-      p.equipment = { ...p.equipment, [data.slot]: data.itemCode };
-    } else if (data.equipment) {
-      p.equipment = data.equipment;
+    if (data && typeof data === 'object') {
+      if (data.equipment && typeof data.equipment === 'object') {
+        p.equipment = { ...data.equipment };
+      } else if (typeof data.slot === 'string') {
+        p.equipment = p.equipment || {};
+        p.equipment[data.slot] = data.itemCode ?? null;
+      }
     }
 
+    console.log(`🧩 Equipment changed: ${p.username || socket.id}`);
     io.emit('player_equipment_changed', { id: p.id, equipment: p.equipment });
   });
 
   /**
-   * הודעות צ׳אט
+   * הודעת צ'אט (בשידור חי בלבד)
+   * מצופה: { username, message, adminLevel }
    */
   socket.on('chat_message', (chatData = {}) => {
     const p = players[socket.id];
@@ -120,25 +140,51 @@ module.exports = function registerPlayerHandlers(io, socket, players) {
 
     const username = chatData.username || p.username || 'Unknown';
     const message = chatData.message || '';
+    const adminLevel = chatData.adminLevel || p.admin_level || 'user';
 
-    console.log([CHAT] ${username}: ${message});
+    console.log(`[CHAT][${p.current_area}] ${username}: ${message}`);
+
     io.emit('new_chat_message', {
-      playerId: socket.id,
-      username,
+      playerId: p.id,
       message,
-      adminLevel: chatData.adminLevel || p.admin_level || 'user',
+      username,
+      adminLevel,
       timestamp: Date.now()
     });
   });
 
   /**
-   * ניתוק שחקן
+   * טרייד – בקשה
    */
-  socket.on('disconnect', () => {
-    const p = players[socket.id];
-    if (!p) return;
+  socket.on('trade_request', (data = {}) => {
+    const { tradeId, initiatorId, receiverId } = data;
+    console.log(`🛒 Trade request ${tradeId} from ${initiatorId} to ${receiverId}`);
+    if (receiverId) io.to(receiverId).emit('trade_request_received', data);
+  });
 
-    console.log(❌ Player disconnected: ${p.username} (${socket.id}));
+  /**
+   * טרייד – עדכון סטטוס
+   */
+  socket.on('trade_update', (data = {}) => {
+    const { tradeId, status, tradeDetails } = data;
+    console.log(`🔁 Trade update ${tradeId}, status: ${status}`);
+
+    if (tradeDetails) {
+      const otherPlayerId =
+        socket.id === (tradeDetails.initiator_id || tradeDetails.initiatorId)
+          ? (tradeDetails.receiver_id || tradeDetails.receiverId)
+          : (tradeDetails.initiator_id || tradeDetails.initiatorId);
+
+      if (otherPlayerId) io.to(otherPlayerId).emit('trade_status_updated', data);
+    }
+  });
+
+  /**
+   * ניתוק
+   */
+  socket.on('disconnect', (reason) => {
+    const p = players[socket.id];
+    console.log(`🔌 Disconnected: ${socket.id} (${reason})`);
     delete players[socket.id];
     io.emit('player_disconnected', socket.id);
   });
