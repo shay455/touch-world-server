@@ -1,96 +1,102 @@
-const express = require('express');
-const http = require('http');
-const { Server } = require('socket.io');
-const cors = require('cors');
+import { Server } from "npm:socket.io@4.7.5";
+import { cors } from "npm:hono@4.2.5/cors";
 
-const app = express();
-const server = http.createServer(app);
-
-// הגדרת כתובות מורשות להתחבר לשרת
-const allowedOrigins = [
-  "https://touch-world.io", // הדומיין הרשמי של המשחק
-  "http://localhost:5173", // כתובת לפיתוח מקומי
-  "http://localhost:8081"  // כתובת נוספת לפיתוח
-];
-
-const io = new Server(server, {
-  cors: {
-    origin: (origin, callback) => {
-      // מאפשר חיבורים ללא 'origin' (כמו בדיקות) או ממקור מורשה
-      if (!origin || allowedOrigins.indexOf(origin) !== -1) {
-        callback(null, true);
-      } else {
-        callback(new Error('Not allowed by CORS'));
-      }
-    },
-    methods: ["GET", "POST"],
-    credentials: true // הוספה קריטית לאימות ופתרון שגיאת ה-WebSocket
-  }
-});
-
-// אובייקט לשמירת רשימת השחקנים המחוברים
 const players = {};
 
-// נתיב לבדיקת תקינות השרת (Health Check)
-app.get('/', (req, res) => {
-  res.status(200).json({
-    status: 'ok',
-    message: 'Touch World Realtime Server is running.',
-    connected_players_count: Object.keys(players).length,
-    connected_players_ids: Object.keys(players)
-  });
+// CORS middleware setup for standard HTTP requests
+const corsMiddleware = cors({
+  origin: ["https://touch-world.io", "http://localhost:5173", "http://localhost:8081"],
+  allowHeaders: ['X-Custom-Header', 'Upgrade-Insecure-Requests'],
+  allowMethods: ['POST', 'GET', 'OPTIONS'],
+  credentials: true,
 });
 
-// לוגיקת ה-Socket.IO המרכזית
-io.on('connection', (socket) => {
-  console.log(`[+] Player connected: ${socket.id}`);
-
-  // יצירת אובייקט שחקן חדש
-  players[socket.id] = {
-    id: socket.id,
-    position_x: 600,
-    position_y: 400,
-    direction: 'front',
-    animation_frame: 'idle',
-    is_moving: false,
-  };
-
-  // שלח לשחקן החדש את רשימת כל השחקנים שכבר מחוברים
-  socket.emit('current_players', players);
-
-  // שלח לכל השאר את פרטי השחקן החדש
-  socket.broadcast.emit('player_joined', players[socket.id]);
-
-  // קבלת עדכון תנועה ושידורו לכל השאר
-  socket.on('player_move', (movementData) => {
-    if (players[socket.id]) {
-      players[socket.id] = { ...players[socket.id], ...movementData };
-      socket.broadcast.emit('player_moved', players[socket.id]);
+const io = new Server({
+    cors: {
+        origin: ["https://touch-world.io", "http://localhost:5173", "http://localhost:8081"],
+        methods: ["GET", "POST"],
+        credentials: true
     }
-  });
+});
 
-  // קבלת הודעת צ'אט ושידורה לכולם
-  socket.on('chat_message', (chatData) => {
-    const messagePayload = {
-      playerId: socket.id,
-      message: chatData.message,
-      username: chatData.username,
-      adminLevel: chatData.adminLevel,
-      timestamp: Date.now()
+io.on("connection", (socket) => {
+    console.log(`[+] A user connected: ${socket.id}`);
+
+    players[socket.id] = {
+        id: socket.id,
+        position_x: 600,
+        position_y: 400,
+        direction: 'front',
+        animation_frame: 'idle',
+        is_moving: false,
     };
-    io.emit('new_chat_message', messagePayload);
-  });
 
-  // טיפול בהתנתקות שחקן
-  socket.on('disconnect', () => {
-    console.log(`[-] Player disconnected: ${socket.id}`);
-    delete players[socket.id];
-    io.emit('player_disconnected', socket.id);
-  });
+    socket.emit("current_players", players);
+    socket.broadcast.emit("player_joined", players[socket.id]);
+
+    socket.on("player_update", (playerData) => {
+        if (players[socket.id]) {
+            players[socket.id] = { ...players[socket.id], ...playerData };
+            socket.broadcast.emit("player_moved", players[socket.id]);
+        }
+    });
+
+    socket.on("chat_message", (chatData) => {
+        console.log(`[CHAT] ${chatData.username}: ${chatData.message}`);
+        io.emit("new_chat_message", {
+            playerId: socket.id,
+            message: chatData.message,
+            username: chatData.username,
+            adminLevel: chatData.adminLevel,
+            timestamp: Date.now()
+        });
+    });
+
+    socket.on("trade_request", (data) => {
+        console.log(`[TRADE] Request from ${data.initiatorId} to ${data.receiverId}`);
+        io.to(data.receiverId).emit("trade_request_received", data);
+    });
+
+    socket.on("trade_update", (data) => {
+        console.log(`[TRADE] Update for trade ${data.tradeId}, status: ${data.status}`);
+        const trade = data.tradeDetails;
+        if (trade) {
+            const otherPlayerId = socket.id === trade.initiator_id ? trade.receiver_id : trade.initiator_id;
+            io.to(otherPlayerId).emit("trade_status_updated", data);
+        }
+    });
+
+    socket.on("disconnect", () => {
+        console.log(`[-] User disconnected: ${socket.id}`);
+        delete players[socket.id];
+        io.emit("player_disconnected", socket.id);
+    });
 });
 
-// הגדרת הפורט שעליו השרת יאזין
-const PORT = process.env.PORT || 8080;
-server.listen(PORT, () => {
-  console.log(`Touch World server listening on port ${PORT}`);
-});
+// The main HTTP handler
+async function handler(req) {
+    // Handle CORS preflight requests for standard HTTP endpoints
+    if (req.method === 'OPTIONS') {
+        const request = new Request(req.url, { headers: req.headers });
+        return await corsMiddleware(request, async () => new Response(null, { status: 204 }))
+    }
+    
+    // Check if the request is for the health check endpoint
+    const url = new URL(req.url);
+    if (url.pathname === '/') {
+         return new Response(
+            JSON.stringify({
+                status: 'ok',
+                message: 'Touch World Realtime Server is running.',
+                connected_players: Object.keys(players).length
+            }),
+            { headers: { "Content-Type": "application/json" } }
+        );
+    }
+    
+    // Upgrade the request to a WebSocket connection for Socket.IO
+    return io.handler(req);
+}
+
+// Deno.serve is the entry point for Base44 functions
+Deno.serve(handler);
