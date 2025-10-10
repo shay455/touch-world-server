@@ -10,12 +10,13 @@ const server = http.createServer(app);
 const allowedOrigins = [
   "https://touch-world.io", // הדומיין הרשמי של המשחק
   "http://localhost:5173", // כתובת לפיתוח מקומי
-  "http://localhost:8081"
+  "http://localhost:8081"  // כתובת נוספת לפיתוח
 ];
 
 const io = new Server(server, {
   cors: {
     origin: (origin, callback) => {
+      // מאפשר חיבורים ללא 'origin' (כמו בדיקות) או ממקור מורשה
       if (!origin || allowedOrigins.indexOf(origin) !== -1) {
         callback(null, true);
       } else {
@@ -23,10 +24,11 @@ const io = new Server(server, {
       }
     },
     methods: ["GET", "POST"],
-    credentials: true // הוספה קריטית לאימות
+    credentials: true // הוספה קריטית לאימות ופתרון שגיאת ה-WebSocket
   }
 });
 
+// אובייקט לשמירת רשימת השחקנים המחוברים
 const players = {};
 
 // נתיב לבדיקת תקינות השרת (Health Check)
@@ -43,6 +45,7 @@ app.get('/', (req, res) => {
 io.on('connection', (socket) => {
   console.log(`[+] Player connected: ${socket.id}`);
 
+  // יצירת אובייקט שחקן חדש
   players[socket.id] = {
     id: socket.id,
     position_x: 600,
@@ -52,9 +55,13 @@ io.on('connection', (socket) => {
     is_moving: false,
   };
 
+  // שלח לשחקן החדש את רשימת כל השחקנים שכבר מחוברים
   socket.emit('current_players', players);
+
+  // שלח לכל השאר את פרטי השחקן החדש
   socket.broadcast.emit('player_joined', players[socket.id]);
 
+  // קבלת עדכון תנועה ושידורו לכל השאר
   socket.on('player_move', (movementData) => {
     if (players[socket.id]) {
       players[socket.id] = { ...players[socket.id], ...movementData };
@@ -62,6 +69,7 @@ io.on('connection', (socket) => {
     }
   });
 
+  // קבלת הודעת צ'אט ושידורה לכולם
   socket.on('chat_message', (chatData) => {
     const messagePayload = {
       playerId: socket.id,
@@ -73,6 +81,7 @@ io.on('connection', (socket) => {
     io.emit('new_chat_message', messagePayload);
   });
 
+  // טיפול בהתנתקות שחקן
   socket.on('disconnect', () => {
     console.log(`[-] Player disconnected: ${socket.id}`);
     delete players[socket.id];
@@ -80,6 +89,7 @@ io.on('connection', (socket) => {
   });
 });
 
+// הגדרת הפורט שעליו השרת יאזין
 const PORT = process.env.PORT || 8080;
 server.listen(PORT, () => {
   console.log(`Touch World server listening on port ${PORT}`);
