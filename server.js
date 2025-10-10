@@ -1,200 +1,104 @@
-import 'dotenv/config';
-import { WebSocketServer } from 'ws';
-import { createClient } from '@base44/sdk';
-import express from 'express';
-import http from 'node:http';
-import cors from 'cors';
-import { URL } from 'node:url';
+const express = require('express');
+const http = require('http');
+const { Server } = require('socket.io');
+const cors = require('cors');
 
-// Advanced workaround for platform linter complaining about 'process' and 'global'
-const _process = (new Function('return this'))().process;
-
-const PORT = _process.env.PORT || 3001;
-
-// --- Express Server Setup ---
 const app = express();
-app.use(cors());
-app.use(express.json());
-
-app.get('/', (req, res) => {
-    res.status(200).json({ 
-        status: 'online', 
-        message: 'Touch World Realtime Server is running!' 
-    });
-});
-
 const server = http.createServer(app);
 
-// --- Base44 Connection ---
-const BASE44_URL = _process.env.BASE44_URL;
-const BASE44_SERVICE_KEY = _process.env.BASE44_SERVICE_KEY;
+// הגדרת כתובות מורשות להתחבר לשרת
+const allowedOrigins = [
+  "https://touch-world.io/", // הדומיין הרשמי של המשחק
+  "http://localhost:5173/", // כתובת לפיתוח מקומי
+  "http://localhost:8081/"
+];
 
-if (!BASE44_URL || !BASE44_SERVICE_KEY) {
-    console.error('FATAL ERROR: Missing BASE44_URL or BASE44_SERVICE_KEY in environment variables.');
-    _process.exit(1);
-}
-
-const base44 = createClient(BASE44_URL, BASE44_SERVICE_KEY);
-console.log('✅ Successfully initialized connection to Base44 services.');
-
-// --- WebSocket Server Setup ---
-const wss = new WebSocketServer({ server });
-
-const clients = new Map(); // key: playerId, value: { ws, areaId, username, sessionId }
-const areaPlayers = new Map(); // key: areaId, value: Set<playerId>
-
-// Helper function to broadcast messages to a specific area
-const broadcastToArea = (areaId, event, payload, excludePlayerId = null) => {
-    const playersInArea = areaPlayers.get(areaId);
-    if (!playersInArea) return;
-
-    const message = JSON.stringify({ event, payload });
-
-    playersInArea.forEach(playerId => {
-        if (playerId !== excludePlayerId) {
-            const client = clients.get(playerId);
-            if (client && client.ws.readyState === client.ws.OPEN) {
-                client.ws.send(message);
-            }
-        }
-    });
-};
-
-wss.on('connection', async (ws, req) => {
-    const urlParams = new URL(req.url, `http://${req.headers.host}`).searchParams;
-    const playerId = urlParams.get('playerId');
-    const areaId = urlParams.get('areaId');
-    const sessionId = urlParams.get('sessionId');
-
-    // **CRITICAL FIX**: Validate incoming parameters before proceeding.
-    if (!playerId || !areaId || !sessionId || playerId === 'undefined' || playerId === 'null') {
-        ws.close(1008, 'Invalid connection parameters');
-        console.warn(`[Connection Attempt Failed] Invalid parameters provided. PlayerID: ${playerId}, AreaID: ${areaId}`);
-        return;
-    }
-
-    try {
-        const playerRecord = await base44.entities.Player.get(playerId);
-        if (!playerRecord || playerRecord.session_id !== sessionId) {
-            ws.close(1008, 'Invalid session');
-            return;
-        }
-        
-        // **CRITICAL FIX**: Attach player ID to the WebSocket object for later reference.
-        ws.playerId = playerId;
-
-        console.log(`[Connect] Player '${playerRecord.username}' (${playerId}) joined area '${areaId}'.`);
-
-        clients.set(playerId, { ws, areaId, username: playerRecord.username, sessionId });
-        if (!areaPlayers.has(areaId)) {
-            areaPlayers.set(areaId, new Set());
-        }
-        areaPlayers.get(areaId).add(playerId);
-
-        const playersInAreaRecords = await base44.entities.Player.filter({ current_area: areaId, is_online: true });
-        const initialState = {};
-        playersInAreaRecords.forEach(p => {
-            if (p.id !== playerId) {
-               initialState[p.id] = p;
-            }
-        });
-        ws.send(JSON.stringify({ event: 'initial_state', payload: initialState }));
-
-        broadcastToArea(areaId, 'player_joined', playerRecord, playerId);
-
-    } catch (error) {
-        console.error(`[Connection Error] for player ${playerId}:`, error.message);
-        ws.close(1011, 'Internal server error on connection');
-        return;
-    }
-
-    ws.on('message', async (rawMessage) => {
-        try {
-            const data = JSON.parse(rawMessage);
-            const { event, payload } = data;
-
-            if (event === 'player_update') {
-                await base44.entities.Player.update(ws.playerId, payload);
-                broadcastToArea(areaId, 'player_moved', { id: ws.playerId, ...payload }, ws.playerId);
-            }
-            
-            else if (event === 'send_chat_message') {
-                const bubbleUpdate = { 
-                    last_bubble_message: payload.message,
-                    last_bubble_timestamp: new Date().toISOString()
-                };
-                await base44.entities.Player.update(ws.playerId, bubbleUpdate);
-                broadcastToArea(areaId, 'chat_message', { playerId: ws.playerId, ...bubbleUpdate });
-            }
-            
-            else if (event === 'trade_request') {
-                const { tradeId, receiverId } = payload;
-                const receiverClient = clients.get(receiverId);
-                if (receiverClient && receiverClient.ws.readyState === receiverClient.ws.OPEN) {
-                    receiverClient.ws.send(JSON.stringify({ event: 'tradeRequest', payload: { tradeId } }));
-                }
-            }
-            
-            else if (event === 'trade_update') {
-                const { tradeId } = payload;
-                // Broadcast to both players involved in the trade
-                const trade = await base44.entities.Trade.get(tradeId);
-                if (trade) {
-                    const initiatorClient = clients.get(trade.initiator_id);
-                    const receiverClient = clients.get(trade.receiver_id);
-                    if (initiatorClient) initiatorClient.ws.send(JSON.stringify({ event: 'tradeUpdate', payload: { tradeId } }));
-                    if (receiverClient) receiverClient.ws.send(JSON.stringify({ event: 'tradeUpdate', payload: { tradeId } }));
-                }
-            }
-
-        } catch (msgError) {
-            console.error(`[Message Error] from player ${ws.playerId}:`, msgError.message);
-        }
-    });
-
-    ws.on('close', async () => {
-        // **CRITICAL FIX**: Use the ID attached to the ws object.
-        const closedPlayerId = ws.playerId;
-        if (!closedPlayerId) {
-            // This socket was never fully authenticated/registered.
-            console.warn('[Disconnect] Socket closed without a registered player ID.');
-            return;
-        }
-
-        const clientData = clients.get(closedPlayerId);
-        if (!clientData) {
-            console.warn(`[Disconnect] Player ${closedPlayerId} was already removed or never fully connected.`);
-            return;
-        }
-        
-        console.log(`[Disconnect] Player '${clientData.username}' (${closedPlayerId}) left area '${clientData.areaId}'.`);
-
-        // Remove player from area and global client list
-        const playersInArea = areaPlayers.get(clientData.areaId);
-        if (playersInArea) {
-            playersInArea.delete(closedPlayerId);
-            if (playersInArea.size === 0) {
-                areaPlayers.delete(clientData.areaId);
-            }
-        }
-        clients.delete(closedPlayerId);
-        
-        // Broadcast disconnection to the area
-        broadcastToArea(clientData.areaId, 'player_left', { id: closedPlayerId });
-        
-        // Update player status in the database
-        try {
-            await base44.entities.Player.update(closedPlayerId, { is_online: false });
-        } catch (dbError) {
-            console.error(`[DB Error on Disconnect] Failed to update player ${closedPlayerId} to offline:`, dbError.message);
-        }
-    });
-
-    ws.on('error', (error) => {
-        console.error(`[WebSocket Error] for player ${ws.playerId}:`, error.message);
-    });
+const io = new Server(server, {
+  cors: {
+    origin: (origin, callback) => {
+      // מאפשר חיבורים ללא 'origin' (כמו אפליקציות מובייל או בדיקות)
+      if (!origin) return callback(null, true);
+      // בודק אם הכתובת המנסה להתחבר נמצאת ברשימת המורשים
+      if (allowedOrigins.indexOf(origin) === -1) {
+        const msg = 'The CORS policy for this site does not allow access from the specified Origin.';
+        return callback(new Error(msg), false);
+      }
+      return callback(null, true);
+    },
+    methods: ["GET", "POST"]
+  }
 });
 
+// אובייקט פשוט לשמירת רשימת השחקנים המחוברים בזיכרון השרת
+const players = {};
+
+// נתיב לבדיקת תקינות השרת (Health Check)
+app.get('/', (req, res) => {
+  res.status(200).json({
+    status: 'ok',
+    message: 'Touch World Realtime Server is running.',
+    connected_players_count: Object.keys(players).length,
+    connected_players_ids: Object.keys(players)
+  });
+});
+
+// לוגיקת ה-Socket.IO המרכזית
+io.on('connection', (socket) => {
+  console.log([+] Player connected: ${socket.id});
+
+  // יצירת אובייקט שחקן חדש עם מיקום התחלתי
+  players[socket.id] = {
+    id: socket.id,
+    position_x: 600, // מיקום ברירת מחדל
+    position_y: 400,
+    direction: 'front',
+    animation_frame: 'idle',
+    is_moving: false,
+    // פרטים נוספים כמו שם משתמש, צבע וכו' יגיעו מהלקוח
+  };
+
+  // 1. שלח לשחקן החדש את רשימת כל השחקנים שכבר מחוברים
+  socket.emit('current_players', players);
+
+  // 2. אירוע "player_joined": שלח לכל השאר את פרטי השחקן החדש
+  socket.broadcast.emit('player_joined', players[socket.id]);
+
+  // 3. אירוע "player_move": קבלת עדכון מיקום משחקן ושידורו לכל השאר
+  socket.on('player_move', (movementData) => {
+    if (players[socket.id]) {
+      // עדכון המידע על השחקן בשרת
+      players[socket.id] = { ...players[socket.id], ...movementData };
+      // שידור המידע המעודכן לכל השחקנים האחרים
+      socket.broadcast.emit('player_moved', players[socket.id]);
+    }
+  });
+
+  // 4. אירוע "chat_message": קבלת הודעת צ'אט ושידורה לכולם
+  socket.on('chat_message', (chatData) => {
+    // הוספת מזהה השחקן וזמן לנתוני הצ'אט
+    const messagePayload = {
+      playerId: socket.id,
+      message: chatData.message,
+      username: chatData.username,
+      adminLevel: chatData.adminLevel,
+      timestamp: Date.now()
+    };
+    // שידור ההודעה לכל השחקנים המחוברים (כולל השולח)
+    io.emit('new_chat_message', messagePayload);
+  });
+
+  // 5. אירוע "disconnect": טיפול בהתנתקות שחקן
+  socket.on('disconnect', () => {
+    console.log([-] Player disconnected: ${socket.id});
+    // הסרת השחקן מרשימת המחוברים
+    delete players[socket.id];
+    // אירוע "player_disconnected": הודעה לכל השאר שהשחקן התנתק
+    io.emit('player_disconnected', socket.id);
+  });
+});
+
+// הגדרת הפורט שעליו השרת יאזין
+const PORT = process.env.PORT || 8080;
 server.listen(PORT, () => {
-    console.log(`🚀 Touch World Realtime Server is listening on port ${PORT}`);
+  console.log(Touch World server listening on port ${PORT});
 });
