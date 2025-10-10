@@ -1,32 +1,27 @@
-// sockets/index.js
-const registerPlayerEvents = require('./handlers/player');
-const registerChatEvents = require('./handlers/chat');
-const registerTradeEvents = require('./handlers/trade');
+// מחבר את כל ה-handlers לאירוע connection
 
-module.exports = (io, players, createDefaultPlayer, safePlayerView, mergeRuntimeUpdate) => {
+const { players, makeDefaultPlayer, safePlayerView } = require('../core/players');
+const registerPlayerHandlers = require('./handlers/player');
+const registerChatHandlers = require('./handlers/chat');
+const registerTradeHandlers = require('./handlers/trade');
+
+module.exports = function attachSockets(io) {
   io.on('connection', (socket) => {
     console.log(`[+] Player connected: ${socket.id}`);
 
-    // יצירת שחקן חדש
-    players[socket.id] = createDefaultPlayer(socket.id);
+    // צור שחקן בסיסי אך ready=false — לא משדרים אותו לשאר עד identify
+    players[socket.id] = makeDefaultPlayer(socket.id);
 
-    // שלח את כל השחקנים הקיימים למתחבר
-    socket.emit('current_players', players);
+    // שלח ללקוח החדש snapshot של שחקנים שכבר ready
+    const snapshot = {};
+    for (const [pid, pdata] of Object.entries(players)) {
+      if (pdata.ready) snapshot[pid] = safePlayerView(pdata);
+    }
+    socket.emit('current_players', snapshot);
 
-    // עדכן את כל השאר על שחקן חדש
-    socket.broadcast.emit('player_joined', safePlayerView(players[socket.id]));
-
-    // רישום אירועים
-    registerPlayerEvents(io, socket, players, safePlayerView, mergeRuntimeUpdate);
-    registerChatEvents(io, socket, players);
-    registerTradeEvents(io, socket, players);
-
-    // ניתוק
-    socket.on('disconnect', () => {
-      console.log(`[-] Player disconnected: ${socket.id}`);
-      delete players[socket.id];
-      io.emit('player_disconnected', socket.id);
-    });
+    // רישום כל ההנדלרים לפלייר/צ׳אט/טרייד
+    registerPlayerHandlers(io, socket);
+    registerChatHandlers(io, socket);
+    registerTradeHandlers(io, socket);
   });
 };
-
