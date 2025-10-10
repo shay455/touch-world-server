@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { User } from '@/entities/User';
 import { Player } from '@/entities/Player';
@@ -1040,4 +1041,536 @@ export default function Game() {
                     clickY >= decoTop && clickY <= decoTop + decoHeight) {
                     
                     // The click is inside an interactive foreground decoration's bounding box.
-                    // This is a simplification. For pixel-perfect, we would nee... (28 KB left)
+                    // This is a simplification. For pixel-perfect, we would need to check transparency.
+                    // For now, let's assume this is good enough.
+                    
+                    if (deco.catalog_id) {
+                        handleOpenCatalog(deco.catalog_id);
+                    } else if (deco.is_portal_to) {
+                        const worldX = decoLeft + decoWidth / 2;
+                        const worldY = decoTop + decoHeight;
+                        moveController.setDestination(worldX, worldY, () => handleChangeArea(deco.is_portal_to));
+                    }
+                    return; // Stop further processing, as we've handled the click.
+                }
+            }
+        }
+
+
+        // NEW: Check against click_block_map first
+        const clickPoint = { x: clickX, y: clickY };
+        for (const polygon of clickBlockMap) {
+            if (isPointInPolygon(clickPoint, polygon)) {
+                console.log("🖱️ Click blocked by click_block_map polygon.");
+                return; // Ignore the click entirely
+            }
+        }
+        
+        if (clickX >= 0 && clickX <= BASE_WIDTH && clickY >= 0 && clickY <= BASE_HEIGHT) {
+             console.log('🖱️ World Click at:', {
+                worldX: clickX.toFixed(0),
+                worldY: clickY.toFixed(0),
+            });
+            moveController.onClick(clickX, clickY);
+        } else {
+             console.log('❌ Click outside world bounds.');
+        }
+
+    }, [moveController, store.myPlayer, isReady, showPlayerCardPopup, showMyStuff, showShop, showGiftWindow, showGameMap, isTradeWindowOpen, showCatalogShopPopup, isSidePanelOpen, clickBlockMap, showAreaSubscriptionPopup, areaDecorations, handleChangeArea, handleOpenCatalog]);
+
+    const handlePlayerClick = useCallback((clickedPlayer) => {
+        if (clickedPlayer.id === store.myPlayer?.id) return;
+        setSelectedPlayerForCard(clickedPlayer);
+        setShowPlayerCardPopup(true);
+    }, [store.myPlayer]);
+
+    const handleAddFriend = async () => {
+        if (!store.myPlayer || !selectedPlayerForCard || !user || isAddingFriend) return;
+        setIsAddingFriend(true);
+        setShowPlayerCardPopup(false);
+        try {
+            const existingFriend = await Friend.filter({
+                user_id: user.id,
+                friend_id: selectedPlayerForCard.user_id
+            });
+
+            if (existingFriend && existingFriend.length > 0) {
+                toastManager.info('השחקן כבר ברשימת החברים שלך!');
+                setIsAddingFriend(false);
+                return;
+            }
+
+            await Friend.create({
+                user_id: user.id,
+                user_username: store.myPlayer.username,
+                friend_id: selectedPlayerForCard.user_id,
+                friend_username: selectedPlayerForCard.username
+            });
+
+            toastManager.success(`✅ ${selectedPlayerForCard.username} התווסף לחברים שלך!`);
+        } catch (error) {
+            console.error("Friend add error:", error);
+            toastManager.error("❌ אירעה שגיאה בהוספת החבר.");
+        } finally {
+            setIsAddingFriend(false);
+        }
+    };
+
+    const handleTradeRequest = async () => {
+        if (!player || !selectedPlayerForCard || pendingOutboundTrade) {
+            toastManager.info("לא ניתן לשלוח בקשה כרגע.");
+            return;
+        }
+        setShowPlayerCardPopup(false);
+        try {
+            const newTrade = await Trade.create({
+                initiator_id: player.id,
+                initiator_username: player.username,
+                receiver_id: selectedPlayerForCard.id,
+                receiver_username: selectedPlayerForCard.username,
+                status: 'pending',
+                expires_at: new Date(Date.now() + 60000).toISOString()
+            });
+            setPendingOutboundTrade(newTrade);
+            socketManager.sendTradeRequest(newTrade.id, newTrade.initiator_id, newTrade.receiver_id);
+            toastManager.success(`בקשת החלפה נשלחה אל ${selectedPlayerForCard.username}`);
+        } catch (error) {
+            toastManager.error("שגיאה בשליחת בקשת החלפה.");
+            console.error(error);
+        }
+    };
+
+    const handleAcceptTrade = async () => {
+        if (!tradeRequest || !player) return;
+        try {
+            const updatedTrade = await Trade.update(tradeRequest.id, { status: 'active' });
+            setActiveTrade(updatedTrade);
+            setIsTradeWindowOpen(true);
+            setTradeRequest(null);
+            socketManager.sendTradeUpdate(updatedTrade.id, 'active', updatedTrade);
+            toastManager.success(`אושרה החלפה עם ${updatedTrade.initiator_username}!`);
+        } catch (error) {
+            toastManager.error("שגיאה באישור ההחלפה.");
+            console.error(error);
+        }
+    };
+
+    const handleDeclineTrade = async () => {
+        if (!tradeRequest) return;
+        try {
+            const updatedTrade = await Trade.update(tradeRequest.id, { status: 'cancelled' });
+            socketManager.sendTradeUpdate(updatedTrade.id, 'cancelled', updatedTrade);
+        } catch (error) {
+            console.error("Error declining trade:", error);
+            toastManager.error("שגיאה בביטול בקשת ההחלפה.");
+        } finally {
+            setTradeRequest(null);
+        }
+    };
+
+    const handleCloseTradeWindow = async () => {
+        if (activeTrade && activeTrade.status !== 'completed' && activeTrade.status !== 'cancelled') {
+            try {
+                const currentTradeState = await Trade.get(activeTrade.id);
+                if (currentTradeState && (currentTradeState.status === 'active' || currentTradeState.status === 'pending')) {
+                    const updatedTrade = await Trade.update(activeTrade.id, { status: 'cancelled' });
+                    socketManager.sendTradeUpdate(activeTrade.id, 'cancelled', updatedTrade);
+                    toastManager.info("ההחלפה בוטלה.");
+                }
+            } catch (e) {
+                console.error("Error cancelling trade on close:", e);
+                toastManager.error("שגיאה בביטול החלפה.");
+            }
+        }
+        setIsTradeWindowOpen(false);
+        setActiveTrade(null);
+    };
+
+    const handleCloseSystemMessage = () => {
+        if (systemMessage) {
+            const seenMessages = JSON.parse(localStorage.getItem('seenSystemMessages') || '[]');
+            if (!seenMessages.includes(systemMessage.id)) {
+                seenMessages.push(systemMessage.id);
+                const recentMessages = seenMessages.slice(-50);
+                localStorage.setItem('seenSystemMessages', JSON.stringify(recentMessages));
+            }
+        }
+        setSystemMessage(null);
+    };
+
+    const handleMessageSent = useCallback(async (message) => {
+        if (store.myPlayer && player && user && socketManager.isSocketConnected()) {
+             try {
+                await ChatMessage.create({
+                    user_id: user.id,
+                    username: player.username,
+                    admin_level: user.admin_level || 'user',
+                    message: message,
+                    area_id: player.current_area,
+                });
+
+                socketManager.sendBubbleMessage(
+                    player.id,
+                    message,
+                    player.username,
+                    user.admin_level || 'user'
+                );
+
+                store.myPlayer.bubbleMessage = {
+                    text: message,
+                    timestamp: Date.now()
+                };
+                setPlayers(store.getAllPlayers().map(p => ({...p})));
+
+            } catch (error) {
+                console.error("Failed to send bubble message:", error);
+            }
+        }
+    }, [store, player, user]);
+
+    // Disconnected and Loading screens are critical and should be on top of everything.
+    // They are currently implemented correctly as they short-circuit the render.
+
+    if (isDisconnected) {
+        return (
+            <div className="h-screen bg-gradient-to-br from-purple-900 to-black flex items-center justify-center text-white z-[200]">
+                <div className="text-center bg-black/60 backdrop-blur-xl border border-red-500/50 rounded-2xl p-8 max-w-md">
+                    <div className="text-6xl mb-4">🚫</div>
+                    <h2 className="text-2xl font-bold mb-4">החיבור נותק</h2>
+                    <p className="text-lg mb-6">{disconnectReason}</p>
+                    <p className="text-sm text-gray-400 mb-6">
+                        ניתן לשחק רק מחלונית אחת בכל זמן נתון.<br/>
+                        החלונית החדשה השתלטה על החיבור.
+                    </p>
+                    <Button
+                        onClick={() => window.location.reload()}
+                        className="bg-purple-600 hover:bg-purple-700"
+                    >
+                        טען מחדש את המשחק
+                    </Button>
+                </div>
+                <Toaster richColors position="top-center" />
+            </div>
+        );
+    }
+
+    if (isLoading || !isReady || !player || !user || areas.length === 0) {
+        return (
+            <div className="h-screen bg-gradient-to-br from-purple-900 to-black flex items-center justify-center text-white z-[200]">
+                <div className="text-center">
+                    <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-white mx-auto mb-4">
+                         <Loader2 className="h-full w-full animate-spin" />
+                    </div>
+                    <div className="text-xl">טוען את עולם טאץ'...</div>
+                    {!isSocketConnected && isReady && (
+                        <div className="text-sm text-yellow-400 mt-2">מתחבר לשרת...</div>
+                    )}
+                </div>
+                <Toaster richColors position="top-center" />
+            </div>
+        );
+    }
+
+    return (
+        <TooltipProvider>
+            {user && <AutoAdminFixer user={user} />}
+
+            <div dir="rtl" id="game-page-container" className="relative h-screen w-screen flex items-center justify-center bg-sky-500 overflow-hidden select-none" onContextMenu={(e) => e.preventDefault()} style={{ userSelect: 'none' }} draggable="false">
+                {/* Toaster is usually outside the main layering for global toasts and system notifications */}
+                <Toaster richColors position="top-center" />
+
+                {/* Layer 1: Game Canvas (Bottom) - z-index: 10 */}
+                <div
+                    ref={gameAreaRef}
+                    className="relative w-[1380px] h-[770px] flex-shrink-0 bg-black rounded-lg shadow-2xl overflow-hidden z-10 pointer-events-auto"
+                    onClick={handleGameAreaClick}
+                >
+                    <img
+                        src={areaToDisplay.background_image || PLACEHOLDER_BG}
+                        alt={areaToDisplay.area_name}
+                        className="absolute inset-0 w-full h-full object-cover pointer-events-none"
+                        draggable="false"
+                    />
+
+                    {areaDecorations.filter(d => d.layer === 0).map(deco => (
+                        <div
+                            key={deco.id}
+                            data-interactive-object="true"
+                            className="absolute"
+                            style={{
+                                left: `${deco.x}%`,
+                                top: `${deco.y}%`,
+                                width: `${deco.width}%`,
+                                height: `${deco.height}%`,
+                                zIndex: 10,
+                                cursor: deco.is_portal_to || deco.catalog_id ? 'pointer' : 'default',
+                                transform: deco.is_flipped ? 'scaleX(-1)' : 'none',
+                                pointerEvents: 'auto'
+                            }}
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                if (deco.catalog_id) {
+                                    handleOpenCatalog(deco.catalog_id);
+                                } else if(deco.is_portal_to) {
+                                    const worldX = (deco.x + deco.width / 2) / 100 * BASE_WIDTH;
+                                    const worldY = (deco.y + deco.height) / 100 * BASE_HEIGHT;
+                                    moveController.setDestination(worldX, worldY, () => handleChangeArea(deco.is_portal_to));
+                                }
+                            }}
+                        >
+                             <ImageWithFallback src={deco.image_url} className="w-full h-full object-contain pointer-events-none" alt="" draggable="false" />
+                        </div>
+                    ))}
+
+                    {/* Player rendering is now handled by PlayerAvatar component */}
+                    <div className="absolute inset-0 w-full h-full pointer-events-none" style={{ zIndex: 20 }}>
+                        {players.map(p => (
+                            <PlayerAvatar
+                                key={p.id}
+                                player={p}
+                                currentUser={user}
+                                bubbleConfig={bubbleConfig}
+                                onPlayerClick={p.id !== store.myPlayer?.id ? handlePlayerClick : null}
+                                isCurrentUserPlayer={p.id === store.myPlayer?.id} // NEW PROP for identification mark
+                            />
+                        ))}
+                    </div>
+
+                    {areaDecorations.filter(d => d.layer === 1).map(deco => (
+                         <div
+                            key={deco.id}
+                            data-interactive-object={!!(deco.is_portal_to || deco.catalog_id)}
+                            className="absolute"
+                            style={{
+                                left: `${deco.x}%`,
+                                top: `${deco.y}%`,
+                                width: `${deco.width}%`,
+                                height: `${deco.height}%`,
+                                zIndex: 1000,
+                                cursor: deco.is_portal_to || deco.catalog_id ? 'pointer' : 'default',
+                                pointerEvents: 'none' // Let clicks pass through to the main canvas
+                            }}
+                         >
+                            <ImageWithFallback src={deco.image_url} className="w-full h-full object-contain" alt="" draggable="false" />
+                         </div>
+                    ))}
+                    
+                    {/* NEW: Render Arcade Portals */}
+                    {arcadePortals.filter(p => p.areaId === currentAreaKey && p.is_active).map(portal => (
+                        <div
+                            key={portal.id}
+                            data-interactive-object="true"
+                            className="absolute group cursor-pointer pointer-events-auto"
+                            style={{
+                                left: `${portal.position_x}%`,
+                                top: `${portal.position_y}%`,
+                                width: `${portal.width}%`,
+                                height: `${portal.height}%`,
+                                zIndex: 10,
+                                transform: 'translate(-50%, -50%)', // Center the element
+                                pointerEvents: 'auto'
+                            }}
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                // Calculate the pixel coordinates for the center of the arcade portal
+                                const destinationX = (portal.position_x / 100) * BASE_WIDTH;
+                                const destinationY = (portal.position_y / 100) * BASE_HEIGHT;
+
+                                moveController.setDestination(destinationX, destinationY, () => {
+                                    navigate(createPageUrl(portal.gameId));
+                                });
+                            }}
+                        >
+                             <ImageWithFallback src={portal.image_url} className="w-full h-full object-contain pointer-events-none" alt="" draggable="false" />
+                        </div>
+                    ))}
+                </div> {/* End Layer 1: Game Canvas */}
+
+
+                {/* Static UI Elements */}
+                <AnimatePresence>
+                    {isUIVisible && user && isSidePanelOpen && (
+                        <RightSidePanel
+                            onClose={() => setIsSidePanelOpen(false)}
+                            onLogout={handleLogout}
+                            isLoggingOut={isLoggingOut}
+                            className="z-40 pointer-events-auto"
+                        >
+                            {/* FriendsList, rendered inside RightSidePanel */}
+                            {user && player && (
+                                <FriendsList
+                                    isOpen={true}
+                                    onClose={() => setIsSidePanelOpen(false)}
+                                    user={user}
+                                    player={player}
+                                />
+                            )}
+                        </RightSidePanel>
+                    )}
+                </AnimatePresence>
+
+                {isReady && user && isUIVisible && user.admin_level && user.admin_level !== 'user' && (
+                    <AdminToolbar
+                        currentUser={user}
+                        onButtonClick={handleToolbarClick}
+                        keepAwayMode={keepAwayMode}
+                        // isInvisible prop removed, as the toggle button for invisibility is moved to BottomToolbar
+                        className="z-30 pointer-events-auto"
+                    />
+                )}
+
+                <AnimatePresence>
+                    {isUIVisible && isReady && user && player && (
+                         <BottomToolbar
+                            currentUser={user}
+                            player={player}
+                            buttons={bottomToolbarButtons} // NEW: Pass dynamic buttons
+                            onButtonClick={handleToolbarClick}
+                            onMessageSent={handleMessageSent}
+                            isInvisible={isInvisible} // NEW: Pass isInvisible state for icon toggle
+                        />
+                    )}
+                </AnimatePresence>
+
+                {/* Popups & Modals */}
+                <AnimatePresence>
+                    {showPlayerCardPopup && selectedPlayerForCard && (
+                        <PlayerCard
+                            player={selectedPlayerForCard}
+                            onClose={() => { setShowPlayerCardPopup(false); setSelectedPlayerForCard(null); }}
+                            onAddFriend={handleAddFriend}
+                            onTradeRequest={handleTradeRequest}
+                            onReport={() => toastManager.info('בקרוב!')}
+                            onGift={() => {
+                                setShowGiftWindow(true);
+                                setGiftTarget(selectedPlayerForCard);
+                                setShowPlayerCardPopup(false);
+                            }}
+                            currentUser={user}
+                            className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50 pointer-events-auto"
+                        />
+                    )}
+
+                    {showMyStuff && user && playerForMyStuff && (
+                        <MyStuffPopup
+                            user={user}
+                            player={playerForMyStuff}
+                            onClose={() => setShowMyStuff(false)}
+                            className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50 pointer-events-auto"
+                        />
+                    )}
+                    {showShop && user && player && (
+                        <ShopPopup
+                            user={user}
+                            player={player}
+                            catalogId={activeShopCatalogId}
+                            onClose={() => {
+                                setShowShop(false);
+                                setActiveShopCatalogId(null);
+                            }}
+                            onForceSync={forceSyncUserData}
+                            className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50 pointer-events-auto"
+                        />
+                    )}
+                    {showGiftWindow && user && player && giftTarget && (
+                        <GiftWindow
+                            player={{...player, coins: user.coins, gems: user.gems}}
+                            user={user}
+                            onClose={() => {setShowGiftWindow(false); setGiftTarget(null);}}
+                            onForceSync={forceSyncUserData}
+                            className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50 pointer-events-auto"
+                            targetUser={giftTarget}
+                        />
+                    )}
+                    {isTradeWindowOpen && activeTrade && player && user && (
+                        <TradeWindow
+                            trade={activeTrade}
+                            currentUser={user}
+                            currentPlayer={player}
+                            onClose={handleCloseTradeWindow}
+                            onTradeCompleted={forceSyncUserData}
+                            className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50 pointer-events-auto"
+                        />
+                    )}
+                </AnimatePresence>
+
+                {/* Full-screen Overlays & System Messages */}
+                <AnimatePresence>
+                    {showGameMap && (
+                        <GameMap
+                            isOpen={true}
+                            onClose={() => setShowGameMap(false)}
+                            onSelectArea={handleChangeArea}
+                            currentArea={currentAreaKey}
+                            areas={areas}
+                            user={user}
+                            className="absolute inset-0 z-60 pointer-events-auto"
+                        />
+                    )}
+                    {systemMessage && <SystemMessageDisplay message={systemMessage} onClose={handleCloseSystemMessage} className="fixed bottom-4 left-1/2 -translate-x-1/2 z-70 pointer-events-auto"/>}
+                </AnimatePresence>
+
+                <AnimatePresence>
+                    {tradeRequest && (
+                        <TradeRequestToast
+                            request={tradeRequest}
+                            onAccept={handleAcceptTrade}
+                            onDecline={handleDeclineTrade}
+                            className="fixed top-5 left-1/2 -translate-x-1/2 z-80 pointer-events-auto"
+                        />
+                    )}
+                </AnimatePresence>
+
+                <AnimatePresence>
+                     {pendingOutboundTrade && (
+                         <motion.div
+                            initial={{ y: -100, opacity: 0 }}
+                            animate={{ y: 0, opacity: 1 }}
+                            exit={{ y: -100, opacity: 0 }}
+                            className="fixed top-5 left-1/2 -translate-x-1/2 bg-gradient-to-b from-blue-500 to-blue-600 text-white p-2 rounded-lg shadow-lg flex items-center gap-3 z-80 border-2 border-blue-400 pointer-events-auto"
+                        >
+                            <ArrowRightLeft className="w-5 h-5 text-yellow-300"/>
+                            <span className="font-bold">בקשת החלפה נשלחה אל {pendingOutboundTrade.receiver_username}...</span>
+                            <button onClick={async () => {
+                                try {
+                                    await Trade.update(pendingOutboundTrade.id, {status: 'cancelled'});
+                                    socketManager.sendTradeUpdate(pendingOutboundTrade.id, 'cancelled');
+                                } catch (e) {
+                                    console.error("Error cancelling pending trade:", e);
+                                    toastManager.error("שגיאה בביטול ההחלפה.");
+                                } finally {
+                                    setPendingOutboundTrade(null);
+                                }
+                            }} className="bg-orange-500 hover:bg-orange-600 rounded-md p-1.5">
+                                <X className="w-4 h-4"/>
+                            </button>
+                         </motion.div>
+                     )}
+                </AnimatePresence>
+
+                {/* Topmost critical overlays */}
+                <AnimatePresence>
+                    {isTransitioning && (
+                        <AreaTransitionScreen
+                            areaName={areas.find(a => a.area_id === targetArea)?.area_name || '...'}
+                            onAnimationComplete={() => setIsTransitioning(false)}
+                            className="absolute inset-0 z-[9999] pointer-events-auto"
+                        />
+                    )}
+                    {showSubscriptionGrant && user && (
+                        <SubscriptionGrantPopup user={user} onClose={() => setShowSubscriptionGrant(false)} />
+                    )}
+                    {showAreaSubscriptionPopup && lockedAreaDetails && (
+                        <SubscriptionRequiredPopup
+                            onClose={() => setShowAreaSubscriptionPopup(false)}
+                            title={lockedAreaDetails.area_name}
+                            message={`הכניסה לאזור '${lockedAreaDetails.area_name}' מיועדת למנויים בלבד. שדרג כדי לפתוח את כל האזורים!`}
+                            imageUrl={lockedAreaDetails.background_image}
+                        />
+                    )}
+                </AnimatePresence>
+
+            </div>
+        </TooltipProvider>
+    );
+}
