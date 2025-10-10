@@ -1,21 +1,25 @@
-// Store בזיכרון + פונקציות עזר לשחקנים
+// core/players.js
+const store = Object.create(null);
 
-const players = Object.create(null);
-
-// שדות שמותר לעדכן מתוך player_update (תנועה/אנימציה בלבד)
-const RUNTIME_FIELDS = new Set([
+// מיפוי שמות שדות שאנחנו כן מאפשרים בעדכוני runtime
+const ALLOWED_RUNTIME_FIELDS = new Set([
   'position_x',
   'position_y',
   'direction',
   'animation_frame',
   'is_moving',
-  'move_type'
+  'move_type',
+  'username',
+  'is_invisible',
+  'keep_away_mode',
+  'skin_code',
+  'admin_level',
 ]);
 
-function makeDefaultPlayer(id) {
+function createDefaultPlayer(socketId) {
   return {
-    id,
-    username: '',
+    id: socketId,
+    username: '',          // יתעדכן ב-identify
     position_x: 600,
     position_y: 400,
     direction: 'front',
@@ -23,22 +27,17 @@ function makeDefaultPlayer(id) {
     is_moving: false,
     move_type: 'walk',
     current_area: 'city',
-    equipment: {},           // { hat: "hat_01", body: "skin_brown", ... }
-    skin_code: 'blue',
-    admin_level: 'user',
+    equipment: {},
     is_invisible: false,
     keep_away_mode: false,
-    ready: false             // לא משדרים לשאר עד identify
+    admin_level: 'user',
+    skin_code: 'blue',
+    ready: false,          // נהפוך ל-true ב-identify
   };
 }
 
-function mergeRuntime(dst, src = {}) {
-  for (const k of Object.keys(src)) {
-    if (RUNTIME_FIELDS.has(k)) dst[k] = src[k];
-  }
-}
-
-function safePlayerView(p) {
+// בניגוד לגרסה הישנה — לא מסננים אם אין username!
+function safeView(p) {
   if (!p) return null;
   return {
     id: p.id,
@@ -51,16 +50,24 @@ function safePlayerView(p) {
     move_type: p.move_type || 'walk',
     current_area: p.current_area || 'city',
     equipment: p.equipment || {},
-    skin_code: p.skin_code || 'blue',
-    admin_level: p.admin_level || 'user',
     is_invisible: !!p.is_invisible,
-    keep_away_mode: !!p.keep_away_mode
+    keep_away_mode: !!p.keep_away_mode,
+    admin_level: p.admin_level || 'user',
+    skin_code: p.skin_code || 'blue',
   };
 }
 
+function mergeRuntimeUpdate(dst, src) {
+  for (const k of Object.keys(src || {})) {
+    if (ALLOWED_RUNTIME_FIELDS.has(k)) {
+      dst[k] = src[k];
+    }
+  }
+}
+
 module.exports = {
-  players,
-  makeDefaultPlayer,
-  mergeRuntime,
-  safePlayerView
+  store,
+  createDefaultPlayer,
+  safeView,
+  mergeRuntimeUpdate,
 };
