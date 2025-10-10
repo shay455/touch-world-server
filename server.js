@@ -8,10 +8,6 @@ const { Server } = require('socket.io');
 const app = express();
 const server = http.createServer(app);
 
-/**
- * IMPORTANT:
- * בלי סלאש בסוף — כך ה-Origin מגיע מהדפדפן.
- */
 const allowedOrigins = [
   'https://touch-world-server.onrender.com',
   'https://touch-world.io',
@@ -19,13 +15,10 @@ const allowedOrigins = [
   'http://localhost:8081'
 ];
 
-/**
- * CORS עבור HTTP (כולל / health)
- */
 app.use(
   cors({
     origin: (origin, cb) => {
-      if (!origin) return cb(null, true); // מאפשר כלים בלי Origin (מובייל/בדיקות/בריאות)
+      if (!origin) return cb(null, true);
       return allowedOrigins.includes(origin)
         ? cb(null, true)
         : cb(new Error('CORS blocked: ' + origin));
@@ -35,42 +28,24 @@ app.use(
   })
 );
 
-/**
- * זיכרון שחקנים (in-memory).
- * שים לב: לא שומרים כאן שדות זמניים כמו bubbleMessage כדי לא "לדלוף" לחדשים.
- */
 const players = Object.create(null);
 
-/**
- * Helper: מסננים את נתוני השחקן ל"שידור בטוח" (ללא שדות זמניים/רגישים).
- * כאן מגדירים במפורש מה מותר לראות בצד לקוח.
- */
 function safePlayerView(p) {
-  if (!p || !p.username) return null; // *** FIX: Don't broadcast players without a username
+  if (!p || !p.username) return null;
   return {
     id: p.id,
     username: p.username || '',
-
-    // מצב תנועה/אנימציה
     position_x: p.position_x,
     position_y: p.position_y,
     direction: p.direction,
     animation_frame: p.animation_frame,
     is_moving: p.is_moving,
-    skin_code: p.skin_code, // Add skin_code for correct rendering
-
-    // אזור (אם בשימוש אצלך)
+    skin_code: p.skin_code,
     area: p.area || 'city',
-
-    // סט ציוד שמוצג באווטאר (למשל { head: 'item_123', body: 'item_777' })
     equipment: p.equipment || {}
   };
 }
 
-/**
- * Helper: ממזגים עדכון תנועה/סטייט בסיסי בלבד.
- * לא מאפשרים להכניס bubbleMessage/שדות שרירותיים דרך player_update.
- */
 const ALLOWED_RUNTIME_FIELDS = new Set([
   'position_x',
   'position_y',
@@ -90,9 +65,6 @@ function mergeRuntimeUpdate(dst, src) {
   }
 }
 
-/**
- * Health check
- */
 app.get('/', (req, res) => {
   res.status(200).json({
     status: 'ok',
@@ -102,9 +74,6 @@ app.get('/', (req, res) => {
   });
 });
 
-/**
- * Socket.IO
- */
 const io = new Server(server, {
   path: '/socket.io',
   cors: {
@@ -124,10 +93,9 @@ const io = new Server(server, {
 io.on('connection', (socket) => {
   console.log(`[+] Player connected: ${socket.id}`);
 
-  // צור שחקן בסיסי ללא בועות וצ׳אטים בהיסטוריה
   players[socket.id] = {
     id: socket.id,
-    username: '', // הקליינט יעדכן את זה מיד עם החיבור
+    username: '',
     position_x: 600,
     position_y: 400,
     direction: 'front',
@@ -138,26 +106,20 @@ io.on('connection', (socket) => {
     equipment: {}
   };
 
-  // שלח למתחבר את כל השחקנים בצורה מסוננת (ללא bubbleMessage)
   const filtered = {};
   for (const [pid, pdata] of Object.entries(players)) {
       const safeView = safePlayerView(pdata);
-      if (safeView) { // Only add players that pass the safe view check (e.g., have a username)
+      if (safeView) {
         filtered[pid] = safeView;
       }
   }
   socket.emit('current_players', filtered);
 
-  // עדכן את כל היתר על שחקן חדש (רק אם יש לו שם משתמש)
   const safeNewPlayer = safePlayerView(players[socket.id]);
   if (safeNewPlayer) {
     socket.broadcast.emit('player_joined', safeNewPlayer);
   }
 
-
-  /**
-   * עדכוני תנועה/מצב בסיסי מהלקוח.
-   */
   socket.on('player_update', (payload = {}) => {
     const p = players[socket.id];
     if (!p) return;
@@ -165,18 +127,18 @@ io.on('connection', (socket) => {
     const hadUsername = !!p.username;
     mergeRuntimeUpdate(p, payload);
     
-    // If the username was just set, broadcast the player to everyone
+    const view = safePlayerView(p);
+    if (!view) return;
+
     if (!hadUsername && p.username) {
         console.log(`[+] Player ${socket.id} is now identified as ${p.username}`);
-        io.emit('player_joined', safePlayerView(p));
+        io.emit('player_joined', view);
     } else {
-        socket.broadcast.emit('player_moved', safePlayerView(p));
+        // *** FIX: Broadcast to ALL clients, including sender, to ensure sync
+        io.emit('player_moved', view);
     }
   });
 
-  /**
-   * עדכון אזור מפורש
-   */
   socket.on('area_change', (data = {}) => {
     const p = players[socket.id];
     if (!p) return;
@@ -185,9 +147,6 @@ io.on('connection', (socket) => {
     io.emit('player_area_changed', { id: p.id, area: p.area });
   });
 
-  /**
-   * צ'אט
-   */
   socket.on('chat_message', (chatData = {}) => {
     const p = players[socket.id];
     if (!p) return;
@@ -197,7 +156,7 @@ io.on('connection', (socket) => {
     const area     = p.area || 'city';
     console.log(`[CHAT][${area}] ${username}: ${message}`);
 
-    io.to(area).emit('new_chat_message', { // Only send to players in the same area
+    io.to(area).emit('new_chat_message', {
       playerId: socket.id,
       message,
       username,
@@ -206,36 +165,28 @@ io.on('connection', (socket) => {
     });
   });
 
-  /**
-   * עדכון ציוד ייעודי
-   */
   socket.on('equipment_change', (data = {}) => {
     const p = players[socket.id];
     if (!p) return;
 
-    // Sanitize and update equipment
     if (typeof data.equipment === 'object' && data.equipment !== null) {
       p.equipment = data.equipment;
     }
     
     console.log(`[EQUIP] Player ${p.username || socket.id} updated equipment.`);
     
-    // Broadcast the change to everyone
     io.emit('player_equipment_changed', {
       id: p.id,
       equipment: p.equipment
     });
   });
 
-
-  // בקשת טרייד
   socket.on('trade_request', (data = {}) => {
     const { tradeId, initiatorId, receiverId } = data;
     console.log(`[TRADE] Request ${tradeId} from ${initiatorId} to ${receiverId}`);
     if (receiverId) io.to(receiverId).emit('trade_request_received', data);
   });
 
-  // עדכון טרייד
   socket.on('trade_update', (data = {}) => {
     const { tradeId, status, tradeDetails } = data;
     console.log(`[TRADE] Update trade ${tradeId}, status: ${status}`);
@@ -250,7 +201,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  // ניתוק
   socket.on('disconnect', () => {
     console.log(`[-] Player disconnected: ${socket.id}`);
     delete players[socket.id];
@@ -258,7 +208,6 @@ io.on('connection', (socket) => {
   });
 });
 
-// הפעלת השרת
 const PORT = process.env.PORT || 8080;
 server.listen(PORT, () => {
   console.log(`Touch World server listening on port ${PORT}`);
