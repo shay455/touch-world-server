@@ -1,4 +1,4 @@
-// server.js — Node + Express + Socket.IO בלבד (בלי JSX/React)
+// server.js — Socket.IO + Express (Node, בלי JSX)
 
 const http = require('http');
 const express = require('express');
@@ -8,7 +8,7 @@ const { Server } = require('socket.io');
 const app = express();
 const server = http.createServer(app);
 
-// אל תשים סלאש בסוף — כך נראה ה-Origin שהדפדפן שולח
+// הרשאות CORS — ללא סלאש בסוף (כך ה-Origin מגיע מהדפדפן)
 const allowedOrigins = [
   'https://touch-world-server.onrender.com',
   'https://touch-world.io',
@@ -16,21 +16,22 @@ const allowedOrigins = [
   'http://localhost:8081'
 ];
 
-// CORS עבור בקשות HTTP רגילות (כולל / health)
+// CORS לבקשות HTTP רגילות (כולל /health)
 app.use(cors({
   origin: (origin, cb) => {
-    if (!origin) return cb(null, true);                // אפליקציות מובייל/פינגים ללא Origin
-    if (allowedOrigins.includes(origin)) return cb(null, true);
-    return cb(new Error('CORS blocked: ' + origin));
+    if (!origin) return cb(null, true);                 // תמיכה בכלים ללא Origin (מובייל/בדיקות)
+    return allowedOrigins.includes(origin)
+      ? cb(null, true)
+      : cb(new Error('CORS blocked: ' + origin));
   },
   methods: ['GET', 'POST', 'OPTIONS'],
   credentials: true
 }));
 
-// סטטוס זיכרון לשחקנים
-const players = {};
+// סטור פשוט בזיכרון לשחקנים
+const players = Object.create(null);
 
-// Health check — נחמד גם לניטור וגם כדי לבדוק שהשרת רץ
+// Health check
 app.get('/', (req, res) => {
   res.status(200).json({
     status: 'ok',
@@ -46,44 +47,44 @@ const io = new Server(server, {
   cors: {
     origin: (origin, cb) => {
       if (!origin) return cb(null, true);
-      if (allowedOrigins.includes(origin)) return cb(null, true);
-      return cb(new Error('CORS blocked: ' + origin));
+      return allowedOrigins.includes(origin)
+        ? cb(null, true)
+        : cb(new Error('CORS blocked: ' + origin));
     },
     methods: ['GET', 'POST'],
     credentials: true
   },
-  transports: ['websocket', 'polling'],   // WS קודם, נופל לפולינג אם צריך
+  transports: ['websocket', 'polling'], // מתחיל ב-WS, נופל לפולינג במקרה הצורך
   allowEIO3: false
 });
 
-// חיבורי Socket.IO
+// חיבורי ריל־טיים
 io.on('connection', (socket) => {
   console.log(`[+] Player connected: ${socket.id}`);
 
-  // צור רשומת שחקן בסיסית
+  // יצירת שחקן ברירת מחדל
   players[socket.id] = {
     id: socket.id,
     position_x: 600,
     position_y: 400,
     direction: 'front',
     animation_frame: 'idle',
-    is_moving: false,
+    is_moving: false
   };
 
-  // שלח למתחבר את מצב כל השחקנים
+  // שלח למתחבר החדש את כל השחקנים
   socket.emit('current_players', players);
-
-  // עדכן את כל היתר על שחקן חדש
+  // עדכן את שאר המחוברים על שחקן חדש
   socket.broadcast.emit('player_joined', players[socket.id]);
 
-  // עדכוני מצב/תנועה מהלקוח
-  socket.on('player_update', (playerData) => {
+  // עדכון מצב/תנועה מהקליינט
+  socket.on('player_update', (playerData = {}) => {
     if (!players[socket.id]) return;
     players[socket.id] = { ...players[socket.id], ...playerData };
     socket.broadcast.emit('player_moved', players[socket.id]);
   });
 
-  // צ'אט
+  // הודעות צ'אט
   socket.on('chat_message', (chatData = {}) => {
     const username = chatData.username || 'Unknown';
     const message  = chatData.message  || '';
@@ -98,28 +99,25 @@ io.on('connection', (socket) => {
     });
   });
 
-  // טרייד — בקשה
+  // בקשת טרייד
   socket.on('trade_request', (data = {}) => {
     const { tradeId, initiatorId, receiverId } = data;
     console.log(`[TRADE] Request ${tradeId} from ${initiatorId} to ${receiverId}`);
-    if (receiverId) {
-      io.to(receiverId).emit('trade_request_received', data);
-    }
+    if (receiverId) io.to(receiverId).emit('trade_request_received', data);
   });
 
-  // טרייד — עדכון סטטוס
+  // עדכון טרייד
   socket.on('trade_update', (data = {}) => {
     const { tradeId, status, tradeDetails } = data;
     console.log(`[TRADE] Update trade ${tradeId}, status: ${status}`);
 
     if (tradeDetails) {
-      const otherPlayerId = socket.id === tradeDetails.initiator_id
-        ? tradeDetails.receiver_id
-        : tradeDetails.initiator_id;
+      const otherPlayerId =
+        socket.id === tradeDetails.initiator_id
+          ? tradeDetails.receiver_id
+          : tradeDetails.initiator_id;
 
-      if (otherPlayerId) {
-        io.to(otherPlayerId).emit('trade_status_updated', data);
-      }
+      if (otherPlayerId) io.to(otherPlayerId).emit('trade_status_updated', data);
     }
   });
 
