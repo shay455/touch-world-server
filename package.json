@@ -1,19 +1,19 @@
 {
   "name": "touch-world-server",
   "version": "1.0.0",
-  "description": "Realtime server for Touch World virtual world.",
+  "description": "Realtime server for Touch World using Socket.IO",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
+  "author": "Touch World Dev",
+  "license": "ISC",
   "dependencies": {
-    "@base44/sdk": "^0.6.0",
-    "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
     "express": "^4.19.2",
-    "ws": "^8.17.1"
+    "socket.io": "^4.7.5",
+    "cors": "^2.8.5"
   },
   "engines": {
-    "node": "18.x"
+    "node": ">=18.0.0"
   }
 }
