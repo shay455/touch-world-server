@@ -1,5 +1,5 @@
+// sockets/handlers/trade.js
 module.exports = function registerTradeHandlers(io, socket) {
-  // בקשת טרייד
   socket.on('trade_request', (data = {}) => {
     const { tradeId, initiatorId, receiverId } = data;
     if (receiverId) {
@@ -8,16 +8,15 @@ module.exports = function registerTradeHandlers(io, socket) {
     }
   });
 
-  // עדכון סטטוס טרייד
   socket.on('trade_update', (data = {}) => {
     const { tradeId, status, tradeDetails } = data;
     console.log(`[TRADE] Update trade ${tradeId}, status: ${status}`);
 
     if (tradeDetails) {
       const otherPlayerId =
-        socket.id === (tradeDetails.initiator_id || tradeDetails.initiitorId)
-          ? (tradeDetails.receiver_id || tradeDetails.receiverId)
-          : (tradeDetails.initiator_id || tradeDetails.initiatorId);
+        socket.id === tradeDetails.initiator_id
+          ? tradeDetails.receiver_id
+          : tradeDetails.initiator_id;
 
       if (otherPlayerId) io.to(otherPlayerId).emit('trade_status_updated', data);
     }
