@@ -1,27 +1,28 @@
-// server.js — מטעין Express + Socket.IO ואת כל ה-handlers המפורקים
+// server.js — Express + Socket.IO (מודולרי)
 
 const http = require('http');
 const express = require('express');
+const cors = require('cors');
 const { Server } = require('socket.io');
 
-const corsMiddleware = require('./core/cors');
-const { ALLOWED_ORIGINS, PORT } = require('./config/config');
-const { players } = require('./core/players');
-const attachSockets = require('./sockets');
+const { allowedOrigins } = require('./config/config');
+const { buildCorsMiddleware } = require('./core/cors');
+const players = require('./core/players');
+const attachSocketHandlers = require('./sockets');
 
 const app = express();
 const server = http.createServer(app);
 
 // CORS ל-HTTP
-app.use(corsMiddleware);
+app.use(buildCorsMiddleware(cors, allowedOrigins));
 
 // Health
 app.get('/', (req, res) => {
   res.status(200).json({
     status: 'ok',
     message: 'Touch World Realtime Server is running.',
-    connected_players_count: Object.keys(players).length,
-    connected_players_ids: Object.keys(players)
+    connected_players_count: Object.keys(players.store).length,
+    connected_players_ids: Object.keys(players.store),
   });
 });
 
@@ -31,21 +32,22 @@ const io = new Server(server, {
   cors: {
     origin: (origin, cb) => {
       if (!origin) return cb(null, true);
-      return ALLOWED_ORIGINS.includes(origin)
+      return allowedOrigins.includes(origin)
         ? cb(null, true)
         : cb(new Error('CORS blocked: ' + origin));
     },
     methods: ['GET', 'POST'],
-    credentials: true
+    credentials: true,
   },
   transports: ['websocket', 'polling'],
-  allowEIO3: false
+  allowEIO3: false,
 });
 
-// חיבור כל ה-handlers
-attachSockets(io);
+// חיבור כל ההנדלרים
+attachSocketHandlers(io);
 
-// Start
+// הפעלה
+const PORT = process.env.PORT || 8080;
 server.listen(PORT, () => {
   console.log(`Touch World server listening on port ${PORT}`);
 });
