@@ -233,20 +233,10 @@ io.on('connection', (socket) => {
     const p = players[socket.id];
     if (!p) return;
 
-    // תמיכה בשני הפורמטים:
-    // 1) { slot, itemId }
-    // 2) { equipment: {...} }
     if (typeof data.equipment === 'object' && data.equipment !== null) {
       p.equipment = { ...(p.equipment || {}), ...data.equipment };
-    } else if (data.slot) {
-      p.equipment = p.equipment || {};
-      if (data.itemId) {
-        p.equipment[data.slot] = data.itemId;
-      } else {
-        delete p.equipment[data.slot];
-      }
     }
-
+    
     console.log(
       `[EQUIP] ${p.username || socket.id} changed equipment =>`,
       JSON.stringify(p.equipment)
