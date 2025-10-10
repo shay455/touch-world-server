@@ -1,35 +1,22 @@
-// server.js — Express + Socket.IO (מטעין Handlers מפורקים)
+// server.js — מטעין Express + Socket.IO ואת כל ה-handlers המפורקים
 
 const http = require('http');
 const express = require('express');
-const cors = require('cors');
 const { Server } = require('socket.io');
 
-// ───── CORS ─────
-const allowedOrigins = [
-  'https://touch-world-server.onrender.com',
-  'https://touch-world.io',
-  'http://localhost:5173',
-  'http://localhost:8081'
-];
+const corsMiddleware = require('./core/cors');
+const { ALLOWED_ORIGINS, PORT } = require('./config/config');
+const { players } = require('./core/players');
+const attachSockets = require('./sockets');
 
 const app = express();
 const server = http.createServer(app);
 
-app.use(cors({
-  origin: (origin, cb) => {
-    if (!origin) return cb(null, true);
-    return allowedOrigins.includes(origin)
-      ? cb(null, true)
-      : cb(new Error('CORS blocked: ' + origin));
-  },
-  methods: ['GET', 'POST', 'OPTIONS'],
-  credentials: true
-}));
+// CORS ל-HTTP
+app.use(corsMiddleware);
 
 // Health
 app.get('/', (req, res) => {
-  const { players } = require('./src/state/players');
   res.status(200).json({
     status: 'ok',
     message: 'Touch World Realtime Server is running.',
@@ -38,13 +25,13 @@ app.get('/', (req, res) => {
   });
 });
 
-// ───── Socket.IO ─────
+// Socket.IO
 const io = new Server(server, {
   path: '/socket.io',
   cors: {
     origin: (origin, cb) => {
       if (!origin) return cb(null, true);
-      return allowedOrigins.includes(origin)
+      return ALLOWED_ORIGINS.includes(origin)
         ? cb(null, true)
         : cb(new Error('CORS blocked: ' + origin));
     },
@@ -55,12 +42,10 @@ const io = new Server(server, {
   allowEIO3: false
 });
 
-// טעינת ה-handlers
-const { onConnection } = require('./src/handlers/onConnection');
-io.on('connection', (socket) => onConnection(io, socket));
+// חיבור כל ה-handlers
+attachSockets(io);
 
 // Start
-const PORT = process.env.PORT || 8080;
 server.listen(PORT, () => {
   console.log(`Touch World server listening on port ${PORT}`);
 });
