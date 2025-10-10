@@ -134,7 +134,6 @@ io.on('connection', (socket) => {
         console.log(`[+] Player ${socket.id} is now identified as ${p.username}`);
         io.emit('player_joined', view);
     } else {
-        // *** FIX: Broadcast to ALL clients, including sender, to ensure sync
         io.emit('player_moved', view);
     }
   });
@@ -156,6 +155,7 @@ io.on('connection', (socket) => {
     const area     = p.area || 'city';
     console.log(`[CHAT][${area}] ${username}: ${message}`);
 
+    // Emitting to a 'room' which is the area name
     io.to(area).emit('new_chat_message', {
       playerId: socket.id,
       message,
