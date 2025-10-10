@@ -1,14 +1,15 @@
-// server.js — Express + Socket.IO (Node, בלי JSX/React)
+// server.js — Express + Native WebSockets (ws)
 
 const http = require('http');
 const express = require('express');
 const cors = require('cors');
-const { Server } = require('socket.io');
+const { WebSocketServer } = require('ws');
 
 const app = express();
 const server = http.createServer(app);
 
-/** כתובות שמורשות להתחבר (חשוב: בלי / בסוף) */
+// --- תצורה ---
+const PORT = process.env.PORT || 8080;
 const allowedOrigins = [
   'https://touch-world-server.onrender.com',
   'https://touch-world.io',
@@ -16,110 +17,87 @@ const allowedOrigins = [
   'http://localhost:8081',
 ];
 
-/** CORS עבור HTTP (בריאות/בדיקות) */
+// --- Middleware ---
 app.use(
   cors({
-    origin: (origin, cb) => {
-      if (!origin) return cb(null, true); // אפליקציות מובייל/כלים ללא Origin
-      return allowedOrigins.includes(origin)
-        ? cb(null, true)
-        : cb(new Error('CORS blocked: ' + origin));
+    origin: (origin, callback) => {
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error('Not allowed by CORS'));
+      }
     },
-    methods: ['GET', 'POST', 'OPTIONS'],
-    credentials: true,
   })
 );
 
-/** זיכרון שחקנים בסיסי (RAM) */
-const players = Object.create(null);
+// --- State (In-Memory) ---
+const players = {}; // אובייקט לאחסון שחקנים לפי ID
+const areaSockets = {}; // אובייקט לאחסון סוקטים לפי אזור
 
-/** View בטוח לשידור ללקוחות */
+// --- Health Check Endpoint ---
+app.get('/', (req, res) => {
+  res.status(200).json({
+    status: 'ok',
+    message: 'Touch World WebSocket Server is running.',
+    connected_players_count: Object.keys(players).length,
+    areas: Object.keys(areaSockets).map(area => ({ area, count: areaSockets[area].size })),
+  });
+});
+
+// --- WebSocket Server ---
+const wss = new WebSocketServer({ server });
+
+// --- Helper Functions ---
+function generateId() {
+  return Math.random().toString(36).substring(2, 10);
+}
+
 function safePlayerView(p) {
-  if (!p) return null;
+  if (!p || !p.username) return null;
   return {
     id: p.id,
-    username: p.username || '',
+    username: p.username,
     position_x: p.position_x,
     position_y: p.position_y,
     direction: p.direction,
     animation_frame: p.animation_frame,
     is_moving: p.is_moving,
     skin_code: p.skin_code,
-    area: p.area || 'city',
+    area: p.area,
     equipment: p.equipment || {},
   };
 }
 
-/** אילו שדות מותר לעדכן ב־player_update */
-const ALLOWED_RUNTIME_FIELDS = new Set([
-  'position_x',
-  'position_y',
-  'direction',
-  'animation_frame',
-  'is_moving',
-  'username',
-  'skin_code',
-  'area', // לא חובה, יש גם אירוע area_change; נשאיר בשביל תאימות
-]);
-
-function mergeRuntimeUpdate(dst, src) {
-  for (const k of Object.keys(src || {})) {
-    if (ALLOWED_RUNTIME_FIELDS.has(k)) dst[k] = src[k];
-  }
+function broadcast(area, message, excludeId = null) {
+    if (!areaSockets[area]) return;
+    const stringifiedMessage = JSON.stringify(message);
+    areaSockets[area].forEach(client => {
+        if (client.id !== excludeId && client.readyState === client.OPEN) {
+            client.send(stringifiedMessage);
+        }
+    });
 }
 
-/** עוזר: השמטת שחקנים שאינם באזור */
-function filterPlayersByArea(area) {
-  const out = {};
-  for (const [pid, pdata] of Object.entries(players)) {
-    if (!pdata) continue;
-    if ((pdata.area || 'city') === area) {
-      const v = safePlayerView(pdata);
-      if (v) out[pid] = v;
-    }
-  }
-  return out;
+function broadcastToAll(area, message) {
+    if (!areaSockets[area]) return;
+    const stringifiedMessage = JSON.stringify(message);
+     areaSockets[area].forEach(client => {
+        if (client.readyState === client.OPEN) {
+            client.send(stringifiedMessage);
+        }
+    });
 }
 
-/** Health Check */
-app.get('/', (req, res) => {
-  res.status(200).json({
-    status: 'ok',
-    message: 'Touch World Realtime Server is running.',
-    connected_players_count: Object.keys(players).length,
-    connected_players_ids: Object.keys(players),
-  });
-});
 
-/** Socket.IO */
-const io = new Server(server, {
-  path: '/socket.io',
-  cors: {
-    origin: (origin, cb) => {
-      if (!origin) return cb(null, true);
-      return allowedOrigins.includes(origin)
-        ? cb(null, true)
-        : cb(new Error('CORS blocked: ' + origin));
-    },
-    methods: ['GET', 'POST'],
-    credentials: true,
-  },
-  transports: ['websocket', 'polling'],
-  allowEIO3: false,
-});
+// --- WebSocket Logic ---
+wss.on('connection', (ws) => {
+  ws.id = generateId();
+  console.log(`[+] Player connected: ${ws.id}`);
 
-/** עוזרים לשידור לפי אזור */
-function emitToArea(area, event, payload) {
-  io.to(area).emit(event, payload);
-}
-
-io.on('connection', (socket) => {
-  console.log(`[+] Player connected: ${socket.id}`);
-
-  // יצירת שחקן בסיסי + אזור ברירת מחדל
-  players[socket.id] = {
-    id: socket.id,
-    username: '',            // ייקבע מצד הלקוח דרך player_update
+  // Initial player state
+  players[ws.id] = {
+    id: ws.id,
+    username: '', // Will be set by client
     position_x: 600,
     position_y: 400,
     direction: 'front',
@@ -129,167 +107,116 @@ io.on('connection', (socket) => {
     skin_code: 'blue',
     equipment: {},
   };
+  ws.area = 'city';
 
-  // צרף את הסוקט לחדר של האזור
-  let currentArea = players[socket.id].area || 'city';
-  socket.join(currentArea);
-
-  // שלח לשחקן החדש את רשימת השחקנים באזור שלו בלבד
-  socket.emit('current_players', filterPlayersByArea(currentArea));
-
-  // שדר לשאר באזור ששחקן חדש הצטרף (רק אם יש View תקין)
-  const joinedView = safePlayerView(players[socket.id]);
-  if (joinedView) {
-    emitToArea(currentArea, 'player_joined', joinedView);
+  // Add to area set
+  if (!areaSockets[ws.area]) {
+    areaSockets[ws.area] = new Set();
   }
+  areaSockets[ws.area].add(ws);
 
-  /** קבלת עדכון מצב שחקן (תנועה/שם/סקין...) */
-  socket.on('player_update', (payload = {}) => {
-    const p = players[socket.id];
-    if (!p) return;
-
-    const prevArea = p.area || 'city';
-    const hadUsername = !!p.username;
-
-    mergeRuntimeUpdate(p, payload);
-
-    // אם מישהו ניסה לשנות area דרך player_update – ניישר עם החדרים
-    if ((p.area || 'city') !== prevArea) {
-      // עזוב חדר ישן
-      socket.leave(prevArea);
-      // הצטרף לחדש
-      currentArea = p.area || 'city';
-      socket.join(currentArea);
-      // שלח לו את שחקני האזור החדש
-      socket.emit('current_players', filterPlayersByArea(currentArea));
-      // עדכן את האזור הישן שהשחקן עזב
-      emitToArea(prevArea, 'player_disconnected', p.id);
-      // עדכן את האזור החדש שהשחקן נכנס
-      emitToArea(currentArea, 'player_joined', safePlayerView(p));
-      return;
-    }
-
-    const view = safePlayerView(p);
-    if (!view) return;
-
-    if (!hadUsername && p.username) {
-      console.log(`[+] Player ${socket.id} identified as ${p.username}`);
-      emitToArea(currentArea, 'player_joined', view);
-    } else {
-      // עדכון תנועה/מצב – לשחקני אותו אזור בלבד
-      emitToArea(currentArea, 'player_moved', view);
-    }
-  });
-
-  /** שינוי אזור מפורש */
-  socket.on('area_change', (data = {}) => {
-    const p = players[socket.id];
-    if (!p) return;
-
-    const fromArea = p.area || 'city';
-    const toArea = typeof data.area === 'string' ? data.area : 'city';
-    if (toArea === fromArea) return;
-
-    p.area = toArea;
-
-    // עזוב/הצטרף חדרים
-    socket.leave(fromArea);
-    socket.join(toArea);
-    currentArea = toArea;
-
-    // עדכן את שני האזורים
-    emitToArea(fromArea, 'player_disconnected', p.id);
-    emitToArea(toArea, 'player_joined', safePlayerView(p));
-
-    // שלח לשחקן את רשימת השחקנים באזור החדש
-    socket.emit('current_players', filterPlayersByArea(toArea));
-
-    // שדר אירוע אזור השתנה (אם אתה צריך לוגיקה בצד לקוח)
-    emitToArea(toArea, 'player_area_changed', { id: p.id, area: p.area });
-  });
-
-  /** צ'אט – שדר רק לאזור הנוכחי; אין שמירת היסטוריה */
-  socket.on('chat_message', (chatData = {}) => {
-    const p = players[socket.id];
-    if (!p) return;
-
-    const username = chatData.username || p.username || 'Unknown';
-    const message = chatData.message || '';
-    const area = p.area || 'city';
-
-    console.log(`[CHAT][${area}] ${username}: ${message}`);
-
-    emitToArea(area, 'new_chat_message', {
-      playerId: socket.id,
-      message,
-      username,
-      adminLevel: chatData.adminLevel || 'user',
-      timestamp: Date.now(),
-    });
-  });
-
-  /** שינוי ציוד */
-  socket.on('equipment_change', (data = {}) => {
-    const p = players[socket.id];
-    if (!p) return;
-
-    if (typeof data.equipment === 'object' && data.equipment !== null) {
-      p.equipment = { ...(p.equipment || {}), ...data.equipment };
-    }
+  // Send current players in the area to the new client
+  const currentPlayersInArea = Object.values(players)
+    .filter(p => p.area === ws.area && p.id !== ws.id)
+    .map(safePlayerView)
+    .filter(Boolean);
     
-    console.log(
-      `[EQUIP] ${p.username || socket.id} changed equipment =>`,
-      JSON.stringify(p.equipment)
-    );
+  ws.send(JSON.stringify({ type: 'current_players', payload: currentPlayersInArea }));
 
-    // שדר לשחקני האזור בלבד
-    const area = p.area || 'city';
-    emitToArea(area, 'player_equipment_changed', {
-      id: p.id,
-      equipment: p.equipment,
-    });
-  });
+  ws.on('message', (rawMessage) => {
+    try {
+      const message = JSON.parse(rawMessage);
+      const player = players[ws.id];
+      if (!player) return;
 
-  /** מסחר */
-  socket.on('trade_request', (data = {}) => {
-    const { tradeId, initiatorId, receiverId } = data || {};
-    console.log(`[TRADE] Request ${tradeId} from ${initiatorId} to ${receiverId}`);
-    if (receiverId) io.to(receiverId).emit('trade_request_received', data);
-  });
+      switch (message.type) {
+        case 'player_update': {
+          const hadUsername = !!player.username;
+          Object.assign(player, message.payload); // Merge updates
+          
+          const view = safePlayerView(player);
+          if (!view) return;
 
-  socket.on('trade_update', (data = {}) => {
-    const { tradeId, status, tradeDetails } = data || {};
-    console.log(`[TRADE] Update trade ${tradeId}, status: ${status}`);
+          // If username was just set, broadcast 'player_joined'
+          if (!hadUsername && player.username) {
+            console.log(`[+] Player ${ws.id} identified as ${player.username}`);
+            broadcastToAll(ws.area, { type: 'player_joined', payload: view });
+          } else {
+            // Otherwise, it's a movement update
+            broadcastToAll(ws.area, { type: 'player_moved', payload: view });
+          }
+          break;
+        }
+        
+        case 'area_change': {
+            const newArea = message.payload.area;
+            if (newArea === ws.area) return;
 
-    if (tradeDetails) {
-      const otherPlayerId =
-        socket.id === tradeDetails.initiator_id
-          ? tradeDetails.receiver_id
-          : tradeDetails.initiator_id;
+            // Notify old area
+            broadcast(ws.area, { type: 'player_left', payload: { playerId: ws.id } });
+            areaSockets[ws.area]?.delete(ws);
 
-      if (otherPlayerId) io.to(otherPlayerId).emit('trade_status_updated', data);
+            // Update state
+            player.area = newArea;
+            ws.area = newArea;
+
+            // Join new area
+            if (!areaSockets[newArea]) areaSockets[newArea] = new Set();
+            areaSockets[newArea].add(ws);
+            
+            // Notify new area
+            broadcast(newArea, { type: 'player_joined', payload: safePlayerView(player) }, ws.id);
+
+            // Send new area's player list to the client
+            const playersInNewArea = Object.values(players)
+                .filter(p => p.area === newArea && p.id !== ws.id)
+                .map(safePlayerView)
+                .filter(Boolean);
+            ws.send(JSON.stringify({ type: 'current_players', payload: playersInNewArea }));
+            break;
+        }
+
+        case 'chat_message':
+          broadcastToAll(ws.area, {
+            type: 'bubble_message',
+            payload: {
+              playerId: ws.id,
+              ...message.payload,
+            },
+          });
+          break;
+        
+        case 'equipment_change':
+            player.equipment = message.payload.equipment;
+            broadcastToAll(ws.area, {
+                type: 'player_equipment_changed',
+                payload: { id: ws.id, equipment: player.equipment }
+            });
+            break;
+
+        // Handle trade and other events similarly
+      }
+    } catch (error) {
+      console.error('Failed to process message:', error);
     }
   });
 
-  /** לקוח מבקש סנכרון מצב נוכחי (למשל אחרי reconnect) */
-  socket.on('request_current_state', () => {
-    const p = players[socket.id];
-    if (!p) return;
-    socket.emit('current_players', filterPlayersByArea(p.area || 'city'));
+  ws.on('close', () => {
+    console.log(`[-] Player disconnected: ${ws.id}`);
+    const player = players[ws.id];
+    if (player && areaSockets[player.area]) {
+      areaSockets[player.area].delete(ws);
+      broadcast(player.area, { type: 'player_left', payload: { playerId: ws.id } });
+    }
+    delete players[ws.id];
   });
 
-  /** ניתוק */
-  socket.on('disconnect', () => {
-    console.log(`[-] Player disconnected: ${socket.id}`);
-    const p = players[socket.id];
-    const area = p?.area || 'city';
-    delete players[socket.id];
-    // עדכן רק את האזור שלו
-    emitToArea(area, 'player_disconnected', socket.id);
+  ws.on('error', (error) => {
+    console.error(`WebSocket error for ${ws.id}:`, error);
   });
 });
 
-const PORT = process.env.PORT || 8080;
+// --- Start Server ---
 server.listen(PORT, () => {
-  console.log(`Touch World server listening on port ${PORT}`);
+  console.log(`Touch World Server (WebSocket) listening on port ${PORT}`);
 });
